@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>distvis — travel time map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="panel" class="ui-card">
+    <h1>distvis</h1>
+    <p class="hint">Click the map or search a place to set the origin. Cells are colored by travel time from it.</p>
+
+    <form id="search-form" autocomplete="off">
+      <input id="search-input" type="text" placeholder="Search a place… e.g. Prague" />
+      <button type="submit">Go</button>
+    </form>
+    <ul id="search-results" hidden></ul>
+
+    <div class="row">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="car" selected>Car</option>
+        <option value="bike">Bike</option>
+        <option value="foot">Foot</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="radius">Radius</label>
+      <select id="radius">
+        <option value="50">50 km</option>
+        <option value="100">100 km</option>
+        <option value="200">200 km</option>
+        <option value="300" selected>300 km (country)</option>
+        <option value="450">450 km</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="density">Detail</label>
+      <select id="density">
+        <option value="coarse">Coarse (fast)</option>
+        <option value="medium" selected>Medium</option>
+        <option value="fine">Fine (slow)</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="opacity">Opacity</label>
+      <input id="opacity" type="range" min="0" max="100" value="55" />
+    </div>
+
+    <div id="status" class="status">No origin selected.</div>
+
+    <div id="legend" hidden>
+      <div class="legend-bar" id="legend-bar"></div>
+      <div class="legend-labels" id="legend-labels"></div>
+      <div class="legend-extra"><span class="swatch unreachable"></span> unreachable / no road</div>
+    </div>
+
+    <p class="credits">
+      Routing: <a href="https://routing.openstreetmap.de" target="_blank" rel="noopener">OSRM / FOSSGIS</a> ·
+      Geocoding: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a> ·
+      Falls back to straight-line estimates when the routing API is unavailable.
+    </p>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
