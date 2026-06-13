@@ -31,6 +31,14 @@
     </div>
 
     <div class="row">
+      <label for="sampling">Cells</label>
+      <select id="sampling">
+        <option value="nodes" selected>Road junctions</option>
+        <option value="grid">Hex grid</option>
+      </select>
+    </div>
+
+    <div class="row">
       <label for="radius">Radius</label>
       <select id="radius">
         <option value="50">50 km</option>
@@ -65,6 +73,7 @@
 
     <p class="credits">
       Routing: <a href="https://routing.openstreetmap.de" target="_blank" rel="noopener">OSRM / FOSSGIS</a> ·
+      Junctions: <a href="https://overpass-api.de" target="_blank" rel="noopener">Overpass</a> ·
       Geocoding: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a> ·
       Falls back to straight-line estimates when the routing API is unavailable.
     </p>

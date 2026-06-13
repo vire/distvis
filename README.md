@@ -14,12 +14,21 @@ pipeline explains most visual quirks:
 
 ### 1. Sampling
 
-A hexagonal grid of sample points is laid over the selected radius
-(`js/geo.js`), spaced `radius / 8|12|18` km apart depending on the Detail
-setting (e.g. 300 km radius at Medium ⇒ ~25 km spacing ⇒ ~520 points). Each
-Voronoi cell simply shows the travel time **to its center point** — everything
-inside a cell gets that one value. Coarser detail = bigger cells = blockier,
-less accurate picture.
+Each Voronoi cell shows the travel time **to its seed point** — everything
+inside a cell gets that one value. Two seeding strategies (the **Cells**
+selector):
+
+- **Road junctions (default).** Real road-network nodes fetched from the
+  [Overpass API](https://overpass-api.de) (`js/nodes.js`): motorway exits
+  (`highway=motorway_junction`) plus significant crossings — nodes shared by
+  3+ motorway/trunk/primary ways. These are then spatially thinned to roughly
+  one node per `radius / 8|12|18` km bucket (Detail setting) so the routing
+  request count stays bounded. Cells follow the actual road network: dense
+  along corridors, sparse in the countryside — and every seed lies *on* a
+  road, so there are no snapping artifacts. If the junction lookup fails or
+  the area has too few major roads, the app falls back to the hex grid.
+- **Hex grid.** A uniform hexagonal grid over the radius (`js/geo.js`),
+  e.g. 300 km radius at Medium detail ⇒ ~25 km spacing ⇒ ~520 points.
 
 ### 2. Routing (the real data path)
 
@@ -34,11 +43,12 @@ OSRM returns the duration in seconds of the **fastest road route** from the
 origin to each point, using OpenStreetMap road data and typical speed limits.
 Important properties of this data:
 
-- **Snapping.** OSRM first snaps every grid point to the nearest routable road.
-  A point that lands in a forest or lake gets evaluated from a road possibly
-  kilometers away; a point next to a motorway exit gets a much better time than
-  its neighbor that snapped to a village lane. This is the main reason two
-  adjacent cells can differ sharply.
+- **Snapping.** OSRM first snaps every sample point to the nearest routable
+  road. With road-junction seeding this is a no-op (the seeds are already on
+  roads), but in hex-grid mode a point that lands in a forest or lake gets
+  evaluated from a road possibly kilometers away. Cells whose point had to be
+  moved more than ~0.6 × the cell spacing (min 1.5 km) are rendered gray as
+  unreliable, with the snap distance shown in the tooltip.
 - **No traffic.** Times are free-flow estimates from speed profiles, not live
   or historical traffic.
 - **`null` = unreachable** (no road connection found) — rendered gray.
@@ -61,19 +71,19 @@ geometry, not reality.
 
 ### 4. Coloring
 
-Colors are mapped linearly from 0 minutes (green) to a **fixed maximum**
-derived from the radius and mode (`radius × 1.3 / mode speed`, rounded up to a
-nice value — e.g. 300 km by car ⇒ 6 h scale). The scale is fixed up front so
-cells can be colored as batches stream in, but it means the palette is not
-stretched to the actual data: if real times top out well below the scale max,
-the reds/purples never appear and differences compress into the green–orange
-range. Hover any cell for the exact minutes — the tooltip is always the ground
-truth.
+Colors run linearly from 0 minutes (green) through yellow/orange/red to purple.
+While batches stream in, a conservative provisional maximum derived from the
+radius and mode (`radius × 1.3 / mode speed`) anchors the scale; once routing
+completes, the scale is **rescaled to the 98th percentile of the actual data**
+(rounded to a nice value) and all cells are repainted, so the full palette is
+always used and the legend reflects real times. Hover any cell for the exact
+minutes — the tooltip is always the ground truth.
 
 ## Controls
 
 - **Search / map click** — set the origin point.
 - **Mode** — car, bike, or foot routing profile.
+- **Cells** — Voronoi seeds: real road junctions (default) or a uniform hex grid.
 - **Radius** — how far out to sample (50–450 km).
 - **Detail** — grid density (finer = more cells = more API batches).
 - **Opacity** — overlay transparency.
