@@ -1,5 +1,6 @@
 import { Delaunay } from "https://cdn.jsdelivr.net/npm/d3-delaunay@6/+esm";
 import { hexGrid, haversineKm } from "./geo.js";
+import { fetchRoadNodes, thinNodes } from "./nodes.js";
 import { travelTimes } from "./routing.js";
 import { colorFor, cssGradient, niceMaxMinutes, formatMinutes, UNREACHABLE_COLOR } from "./colors.js";
 
@@ -23,6 +24,7 @@ let originMarker = null;
 
 const ui = {
   mode: document.getElementById("mode"),
+  sampling: document.getElementById("sampling"),
   radius: document.getElementById("radius"),
   density: document.getElementById("density"),
   opacity: document.getElementById("opacity"),
@@ -106,7 +108,7 @@ function setOrigin(point) {
   compute();
 }
 
-for (const el of [ui.mode, ui.radius, ui.density]) {
+for (const el of [ui.mode, ui.sampling, ui.radius, ui.density]) {
   el.addEventListener("change", () => { if (origin) compute(); });
 }
 
@@ -114,7 +116,7 @@ ui.opacity.addEventListener("input", () => {
   cellLayer.eachLayer((layer) => layer.setStyle({ fillOpacity: fillOpacity() }));
 });
 
-// --- Core: grid -> voronoi -> travel times -> colored cells -----------------
+// --- Core: sample points -> voronoi -> travel times -> colored cells --------
 
 async function compute() {
   abortController?.abort();
@@ -125,13 +127,36 @@ async function compute() {
   const mode = ui.mode.value;
   const radiusKm = Number(ui.radius.value);
   const spacingKm = Math.max(2, radiusKm / DENSITY_DIVISOR[ui.density.value]);
+  // A point this far from any road gets its cell grayed as unreliable.
+  const snapLimitMeters = Math.max(1500, spacingKm * 600);
 
-  const points = hexGrid(origin, radiusKm, spacingKm);
-  const inner = points.filter((p) => !p.edge);
+  // Sample points: real road junctions (default) or a plain hex grid.
+  let inner = null;
+  let samplingUsed = ui.sampling.value;
+  let samplingNote = "";
+  if (samplingUsed === "nodes") {
+    setStatus("Finding road junctions…", "working");
+    try {
+      const nodes = await fetchRoadNodes(origin, radiusKm, signal);
+      if (signal.aborted) return;
+      const thinned = thinNodes(nodes, origin, spacingKm);
+      if (thinned.length < 12) throw new Error("too few junctions in this area");
+      inner = [{ lat: origin.lat, lng: origin.lng }, ...thinned];
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      samplingUsed = "grid";
+      samplingNote = " — junction lookup failed, using hex grid";
+    }
+  }
+  const grid = hexGrid(origin, radiusKm, spacingKm);
+  if (!inner) inner = grid.filter((p) => !p.edge);
+  // The off-map edge ring bounds the outermost Voronoi cells in both modes.
+  const points = [...inner, ...grid.filter((p) => p.edge)];
 
-  // Fixed color domain so cells can be colored as batches arrive.
-  const maxMinutes = niceMaxMinutes(((radiusKm * 1.3) / MODE_SPEED_KMH[mode]) * 60);
-  renderLegend(maxMinutes);
+  // Conservative color domain so cells can be colored as batches arrive;
+  // rescaled to the actual data once routing completes.
+  let domainMax = niceMaxMinutes(((radiusKm * 1.3) / MODE_SPEED_KMH[mode]) * 60);
+  renderLegend(domainMax);
 
   // Voronoi in locally-corrected equirectangular coordinates so cells are
   // geometrically regular (longitude degrees shrink with latitude).
@@ -146,65 +171,95 @@ async function compute() {
   ]);
 
   cellLayer.clearLayers();
-  const cellByInnerIndex = [];
-  let innerIdx = 0;
-  for (let i = 0; i < points.length; i++) {
-    if (points[i].edge) continue;
-    const cell = voronoi.cellPolygon(i);
-    if (!cell) { cellByInnerIndex[innerIdx++] = null; continue; }
-    const latlngs = cell.map(([x, y]) => [y, x / cosLat]);
-    const polygon = L.polygon(latlngs, {
+  // cells[i] corresponds to inner[i] (inner points are first in `points`).
+  const cells = inner.map((point, i) => {
+    const polygon = voronoi.cellPolygon(i);
+    if (!polygon) return { point, layer: null, minutes: null, unreliable: false, done: false };
+    const latlngs = polygon.map(([x, y]) => [y, x / cosLat]);
+    const layer = L.polygon(latlngs, {
       renderer: canvasRenderer,
       stroke: false,
       fillColor: UNREACHABLE_COLOR,
       fillOpacity: fillOpacity() * 0.35, // dim until its travel time arrives
       interactive: true,
     }).addTo(cellLayer);
-    cellByInnerIndex[innerIdx++] = polygon;
-  }
+    return { point, layer, minutes: null, unreliable: false, done: false };
+  });
 
-  setStatus(`Routing ${inner.length} sample points…`, "working");
+  const cellStyle = (cell) => ({
+    fillColor: cell.minutes === null || cell.unreliable
+      ? UNREACHABLE_COLOR
+      : colorFor(cell.minutes / domainMax),
+    fillOpacity: fillOpacity(),
+  });
 
-  const colorize = (durations, upTo) => {
+  const colorize = (durations, snapMeters, upTo) => {
     for (let i = 0; i < upTo; i++) {
-      const polygon = cellByInnerIndex[i];
-      if (!polygon || polygon._distvisDone) continue;
-      const seconds = durations[i];
-      const minutes = seconds === null ? null : seconds / 60;
-      polygon.setStyle({
-        fillColor: minutes === null ? UNREACHABLE_COLOR : colorFor(minutes / maxMinutes),
-        fillOpacity: fillOpacity(),
-      });
-      polygon.bindTooltip(tooltipHtml(inner[i], minutes), { sticky: true });
-      polygon._distvisDone = true;
+      const cell = cells[i];
+      if (!cell?.layer || cell.done) continue;
+      cell.minutes = durations[i] === null ? null : durations[i] / 60;
+      cell.unreliable = snapMeters[i] > snapLimitMeters;
+      cell.done = true;
+      cell.layer.setStyle(cellStyle(cell));
+      cell.layer.bindTooltip(tooltipHtml(cell, snapMeters[i]), { sticky: true });
     }
   };
 
+  setStatus(`Routing ${inner.length} sample points…`, "working");
+
   try {
-    const { durations, source } = await travelTimes(origin, inner, mode, {
+    const { durations, snapMeters, source } = await travelTimes(origin, inner, mode, {
       signal,
-      onProgress: (done, total, partial) => {
+      onProgress: (done, total, partialDurations, partialSnaps) => {
         if (signal.aborted) return;
-        colorize(partial, done);
+        colorize(partialDurations, partialSnaps, done);
         setStatus(`Routing… ${done}/${total} points`, "working");
       },
     });
     if (signal.aborted) return;
-    colorize(durations, durations.length);
+    colorize(durations, snapMeters, durations.length);
+
+    // Stretch the palette over the actual data (98th percentile dodges outliers).
+    const dataMax = dataDomainMax(cells);
+    if (dataMax && dataMax !== domainMax) {
+      domainMax = dataMax;
+      renderLegend(domainMax);
+      for (const cell of cells) {
+        if (cell.done && cell.layer) cell.layer.setStyle(cellStyle(cell));
+      }
+    }
+
     const sourceNote = source === "estimate"
-      ? " (routing API unreachable — showing straight-line estimates)"
+      ? " — routing API unreachable, showing straight-line estimates"
       : "";
-    setStatus(`${inner.length} cells from “${origin.label}” by ${mode}${sourceNote}.`,
-      source === "estimate" ? "error" : "");
+    const cellsNote = samplingUsed === "nodes" ? "road-junction" : "hex-grid";
+    setStatus(
+      `${inner.length} ${cellsNote} cells from “${origin.label}” by ${mode}${samplingNote}${sourceNote}.`,
+      source === "estimate" || samplingNote ? "error" : "");
   } catch (err) {
     if (err.name !== "AbortError") setStatus(`Failed: ${err.message}`, "error");
   }
 }
 
-function tooltipHtml(point, minutes) {
-  const time = minutes === null ? "unreachable" : formatMinutes(minutes);
-  const dist = haversineKm(origin, point).toFixed(0);
-  return `<b>${time}</b><br>${dist} km from ${origin.label}`;
+function dataDomainMax(cells) {
+  const minutes = cells
+    .filter((c) => c.done && c.minutes !== null && !c.unreliable)
+    .map((c) => c.minutes)
+    .sort((a, b) => a - b);
+  if (minutes.length === 0) return null;
+  const p98 = minutes[Math.min(minutes.length - 1, Math.floor(minutes.length * 0.98))];
+  return niceMaxMinutes(p98);
+}
+
+function tooltipHtml(cell, snapM) {
+  const dist = haversineKm(origin, cell.point).toFixed(0);
+  if (cell.minutes === null) {
+    return `<b>unreachable</b><br>${dist} km from ${origin.label}`;
+  }
+  if (cell.unreliable) {
+    return `<b>~${formatMinutes(cell.minutes)}</b> (nearest road ${(snapM / 1000).toFixed(1)} km away)<br>${dist} km from ${origin.label}`;
+  }
+  return `<b>${formatMinutes(cell.minutes)}</b><br>${dist} km from ${origin.label}`;
 }
 
 function renderLegend(maxMinutes) {
