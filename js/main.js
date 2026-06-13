@@ -293,10 +293,13 @@ async function compute() {
     fillOpacity: fillOpacity(),
   });
 
-  const colorize = (durations, snapMeters, upTo) => {
-    for (let i = 0; i < upTo; i++) {
+  // Color any cell whose duration has arrived. Batches finish out of order
+  // under concurrency, so we check each cell's own data rather than assuming a
+  // contiguous prefix is ready (undefined = not yet filled; null = unreachable).
+  const colorize = (durations, snapMeters) => {
+    for (let i = 0; i < cells.length; i++) {
       const cell = cells[i];
-      if (!cell?.layer || cell.done) continue;
+      if (!cell?.layer || cell.done || durations[i] === undefined) continue;
       cell.minutes = durations[i] === null ? null : durations[i] / 60;
       cell.unreliable = snapMeters[i] > snapLimitMeters;
       cell.done = true;
@@ -312,14 +315,14 @@ async function compute() {
   try {
     let result = cacheGet(routeKey);
     if (result) {
-      colorize(result.durations, result.snapMeters, result.durations.length);
+      colorize(result.durations, result.snapMeters);
     } else {
       setStatus(`Routing ${inner.length} sample points…`, "working");
       result = await travelTimes(origin, inner, mode, {
         signal,
         onProgress: (done, total, partialDurations, partialSnaps) => {
           if (signal.aborted) return;
-          colorize(partialDurations, partialSnaps, done);
+          colorize(partialDurations, partialSnaps);
           setStatus(`Routing… ${done}/${total} points`, "working");
         },
       });
@@ -328,7 +331,7 @@ async function compute() {
       if (result.source === "osrm") cacheSet(routeKey, result);
     }
     const { durations, snapMeters, source } = result;
-    colorize(durations, snapMeters, durations.length);
+    colorize(durations, snapMeters);
 
     // Stretch the palette over the actual data (98th percentile dodges outliers).
     const dataMax = dataDomainMax(cells);
