@@ -48,8 +48,8 @@
     <div class="row">
       <label for="sampling">Cells</label>
       <select id="sampling">
-        <option value="nodes" selected>Road junctions</option>
-        <option value="grid">Hex grid</option>
+        <option value="grid" selected>Hex grid (fast)</option>
+        <option value="nodes">Road junctions</option>
       </select>
     </div>
 
@@ -65,11 +65,12 @@
     </div>
 
     <div class="row">
-      <label for="density">Detail</label>
+      <label for="density">Cell size</label>
       <select id="density">
-        <option value="coarse">Coarse (fast)</option>
-        <option value="medium" selected>Medium</option>
-        <option value="fine">Fine (slow)</option>
+        <option value="5">5 km</option>
+        <option value="10" selected>10 km</option>
+        <option value="20">20 km</option>
+        <option value="40">40 km</option>
       </select>
     </div>
 

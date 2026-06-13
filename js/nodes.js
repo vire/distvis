@@ -16,12 +16,21 @@ const OVERPASS_ENDPOINTS = [
 const MAJOR_ROADS = "motorway|trunk|primary";
 
 /**
+// Junction sets are origin/radius-static, so cache them: repeat clicks in the
+// same area (rounded to ~1 km) skip the slow Overpass round-trip entirely.
+const nodeCache = new Map();
+
+/**
  * Fetch road nodes within `radiusKm` of `origin`:
  * - `highway=motorway_junction` nodes (exits), plus
  * - nodes shared by 3+ major-road ways (real intersections; the 3+ threshold
  *   skips nodes where a single road is merely split into two OSM ways).
  */
 export async function fetchRoadNodes(origin, radiusKm, signal) {
+  const cacheKey = `${origin.lat.toFixed(2)},${origin.lng.toFixed(2)},${radiusKm}`;
+  const cached = nodeCache.get(cacheKey);
+  if (cached) return cached;
+
   const around = `(around:${Math.round(radiusKm * 1000)},${origin.lat.toFixed(5)},${origin.lng.toFixed(5)})`;
   const query = `[out:json][timeout:45];
 way[highway~"^(${MAJOR_ROADS})$"]${around}->.roads;
@@ -41,9 +50,11 @@ out skel qt;`;
       });
       if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
       const data = await res.json();
-      return (data.elements ?? [])
+      const nodes = (data.elements ?? [])
         .filter((el) => el.type === "node")
         .map((el) => ({ lat: el.lat, lng: el.lon }));
+      nodeCache.set(cacheKey, nodes);
+      return nodes;
     } catch (err) {
       if (err.name === "AbortError") throw err;
       lastError = err;

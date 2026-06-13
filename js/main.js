@@ -5,7 +5,22 @@ import { travelTimes } from "./routing.js";
 import { colorFor, cssGradient, niceMaxMinutes, formatMinutes, UNREACHABLE_COLOR } from "./colors.js";
 
 const MODE_SPEED_KMH = { car: 75, bike: 16, foot: 4.5 };
-const DENSITY_DIVISOR = { coarse: 8, medium: 12, fine: 18 };
+
+// Cap on routed sample points so a large radius at a small cell size stays
+// responsive; the cell size is coarsened to fit when it would be exceeded.
+const MAX_ROUTE_POINTS = 1200;
+
+/**
+ * Hex spacing in km: the requested cell size, enlarged just enough that the
+ * number of cells covering the radius stays within MAX_ROUTE_POINTS.
+ */
+function effectiveSpacingKm(radiusKm, desiredKm) {
+  const hexAreaKm2 = (s) => (Math.sqrt(3) / 2) * s * s;
+  const estCells = (Math.PI * radiusKm * radiusKm) / hexAreaKm2(desiredKm);
+  return estCells > MAX_ROUTE_POINTS
+    ? desiredKm * Math.sqrt(estCells / MAX_ROUTE_POINTS)
+    : desiredKm;
+}
 
 // --- Map setup -------------------------------------------------------------
 
@@ -182,7 +197,11 @@ async function compute() {
 
   const mode = ui.mode.value;
   const radiusKm = Number(ui.radius.value);
-  const spacingKm = Math.max(2, radiusKm / DENSITY_DIVISOR[ui.density.value]);
+  const desiredKm = Number(ui.density.value);
+  const spacingKm = effectiveSpacingKm(radiusKm, desiredKm);
+  const coarsenedNote = spacingKm > desiredKm + 0.5
+    ? ` (cells enlarged to ~${Math.round(spacingKm)} km to stay responsive)`
+    : "";
   // A point this far from any road gets its cell grayed as unreliable.
   const snapLimitMeters = Math.max(1500, spacingKm * 600);
 
@@ -195,7 +214,7 @@ async function compute() {
     try {
       const nodes = await fetchRoadNodes(origin, radiusKm, signal);
       if (signal.aborted) return;
-      const thinned = thinNodes(nodes, origin, spacingKm);
+      const thinned = thinNodes(nodes, origin, spacingKm, MAX_ROUTE_POINTS);
       if (thinned.length < 12) throw new Error("too few junctions in this area");
       inner = [{ lat: origin.lat, lng: origin.lng }, ...thinned];
     } catch (err) {
@@ -293,7 +312,7 @@ async function compute() {
       : "";
     const cellsNote = samplingUsed === "nodes" ? "road-junction" : "hex-grid";
     setStatus(
-      `${inner.length} ${cellsNote} cells from “${origin.label}” by ${mode}${samplingNote}${sourceNote}.`,
+      `${inner.length} ${cellsNote} cells from “${origin.label}” by ${mode}${coarsenedNote}${samplingNote}${sourceNote}.`,
       source === "estimate" || samplingNote ? "error" : "");
   } catch (err) {
     if (err.name !== "AbortError") setStatus(`Failed: ${err.message}`, "error");
