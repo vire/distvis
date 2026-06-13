@@ -10,6 +10,28 @@ const MODE_SPEED_KMH = { car: 75, bike: 16, foot: 4.5 };
 // responsive; the cell size is coarsened to fit when it would be exceeded.
 const MAX_ROUTE_POINTS = 1200;
 
+// Cache routing results by their deterministic inputs so re-running an
+// identical view (re-click, toggle a setting back) reuses data instead of
+// hitting the rate-limited routing API again. Bounded to the most recent few.
+const routeCache = new Map();
+const ROUTE_CACHE_MAX = 24;
+
+function cacheGet(key) {
+  const hit = routeCache.get(key);
+  if (hit) { // refresh recency
+    routeCache.delete(key);
+    routeCache.set(key, hit);
+  }
+  return hit;
+}
+
+function cacheSet(key, value) {
+  routeCache.set(key, value);
+  if (routeCache.size > ROUTE_CACHE_MAX) {
+    routeCache.delete(routeCache.keys().next().value);
+  }
+}
+
 /**
  * Hex spacing in km: the requested cell size, enlarged just enough that the
  * number of cells covering the radius stays within MAX_ROUTE_POINTS.
@@ -283,18 +305,29 @@ async function compute() {
     }
   };
 
-  setStatus(`Routing ${inner.length} sample points…`, "working");
+  // Inner points are deterministic from these inputs, so they key the cache.
+  const routeKey = `${samplingUsed}|${mode}|${radiusKm}|${Math.round(spacingKm)}|` +
+    `${origin.lat.toFixed(4)},${origin.lng.toFixed(4)}|${inner.length}`;
 
   try {
-    const { durations, snapMeters, source } = await travelTimes(origin, inner, mode, {
-      signal,
-      onProgress: (done, total, partialDurations, partialSnaps) => {
-        if (signal.aborted) return;
-        colorize(partialDurations, partialSnaps, done);
-        setStatus(`Routing… ${done}/${total} points`, "working");
-      },
-    });
-    if (signal.aborted) return;
+    let result = cacheGet(routeKey);
+    if (result) {
+      colorize(result.durations, result.snapMeters, result.durations.length);
+    } else {
+      setStatus(`Routing ${inner.length} sample points…`, "working");
+      result = await travelTimes(origin, inner, mode, {
+        signal,
+        onProgress: (done, total, partialDurations, partialSnaps) => {
+          if (signal.aborted) return;
+          colorize(partialDurations, partialSnaps, done);
+          setStatus(`Routing… ${done}/${total} points`, "working");
+        },
+      });
+      if (signal.aborted) return;
+      // Only cache fully-real results; estimates should be retried next time.
+      if (result.source === "osrm") cacheSet(routeKey, result);
+    }
+    const { durations, snapMeters, source } = result;
     colorize(durations, snapMeters, durations.length);
 
     // Stretch the palette over the actual data (98th percentile dodges outliers).

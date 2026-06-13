@@ -17,13 +17,26 @@ const DETOUR_FACTOR = 1.3;
 // Keep table requests well under public-server limits (1 source + N dests).
 const BATCH_SIZE = 99;
 
-// Run several table requests at once so routing isn't a long serial wait,
-// while staying gentle on the public OSRM instances.
-const CONCURRENCY = 4;
+// The FOSSGIS OSRM demo server is a shared free service that rate-limits
+// bursts (HTTP 429). Keep concurrency low and retry rate-limited batches with
+// backoff so we recover real data instead of dumping to straight-line
+// estimates the moment the server pushes back.
+const CONCURRENCY = 2;
+const MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 600;
 
 // Per-request timeout so a hung public API degrades to fallback instead of
 // stalling the app indefinitely.
 const REQUEST_TIMEOUT_MS = 30000;
+
+/** Abortable sleep: rejects with the signal's reason if aborted while waiting. */
+function delay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); reject(signal.reason); }, { once: true });
+  });
+}
 
 /**
  * Signal that aborts when `parent` aborts (AbortError, propagated) or after
@@ -58,17 +71,35 @@ export async function travelTimes(origin, points, mode, { signal, onProgress } =
   const starts = [];
   for (let s = 0; s < points.length; s += BATCH_SIZE) starts.push(s);
 
+  // When one batch is rate-limited, hold all workers back until this time so we
+  // stop hammering the server instead of each worker tripping 429 in turn.
+  let cooldownUntil = 0;
+
   const runBatch = async (start) => {
-    signal?.throwIfAborted();
     const batch = points.slice(start, start + BATCH_SIZE);
-    try {
-      const result = await osrmTable(profile, origin, batch, signal);
-      result.durations.forEach((d, i) => { durations[start + i] = d; });
-      result.snapMeters.forEach((s, i) => { snapMeters[start + i] = s; });
-    } catch (err) {
-      if (err.name === "AbortError") throw err;
-      usedEstimate = true;
-      batch.forEach((p, i) => { durations[start + i] = estimateSeconds(origin, p, mode); });
+    for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
+      const pause = cooldownUntil - Date.now();
+      if (pause > 0) await delay(pause, signal);
+      try {
+        const result = await osrmTable(profile, origin, batch, signal);
+        result.durations.forEach((d, i) => { durations[start + i] = d; });
+        result.snapMeters.forEach((s, i) => { snapMeters[start + i] = s; });
+        break;
+      } catch (err) {
+        if (err.name === "AbortError") throw err;
+        if (err.retryable && attempt < MAX_RETRIES) {
+          const backoff = err.retryAfterMs ||
+            BASE_BACKOFF_MS * 2 ** attempt + Math.random() * 250;
+          cooldownUntil = Math.max(cooldownUntil, Date.now() + backoff);
+          await delay(backoff, signal);
+          continue;
+        }
+        // Out of retries (or a non-retryable error): fall back to estimate.
+        usedEstimate = true;
+        batch.forEach((p, i) => { durations[start + i] = estimateSeconds(origin, p, mode); });
+        break;
+      }
     }
     completed += batch.length;
     onProgress?.(completed, points.length, durations, snapMeters);
@@ -91,7 +122,15 @@ async function osrmTable(profile, origin, destinations, signal) {
     .join(";");
   const url = `${OSRM_BASE}/${profile}/table/v1/driving/${coords}?sources=0&annotations=duration`;
   const res = await fetch(url, { signal: timeoutSignal(signal, REQUEST_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
+  if (!res.ok) {
+    // 429 (rate limited) and 5xx (transient server) are worth retrying.
+    const retryable = res.status === 429 || res.status >= 500;
+    const err = new Error(`OSRM HTTP ${res.status}`);
+    err.retryable = retryable;
+    const retryAfter = Number(res.headers.get("retry-after"));
+    if (retryAfter > 0) err.retryAfterMs = retryAfter * 1000;
+    throw err;
+  }
   const data = await res.json();
   if (data.code !== "Ok" || !data.durations?.[0]) {
     throw new Error(`OSRM error: ${data.code ?? "no durations"}`);
