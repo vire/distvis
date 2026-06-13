@@ -63,7 +63,10 @@ export function timeoutSignal(parent, ms) {
  */
 export async function travelTimes(origin, points, mode, { signal, onProgress } = {}) {
   const { profile } = MODES[mode];
-  const durations = new Array(points.length).fill(null);
+  // Holes (undefined) mean "not filled yet"; a written `null` means genuinely
+  // unreachable. Keeping them distinct lets callers color only arrived cells,
+  // which matters because batches complete out of order under concurrency.
+  const durations = new Array(points.length);
   const snapMeters = new Array(points.length).fill(0);
   let usedEstimate = false;
   let completed = 0;
