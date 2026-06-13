@@ -105,12 +105,41 @@ function setOrigin(point) {
   originMarker = L.marker([point.lat, point.lng], { title: point.label })
     .addTo(map)
     .bindTooltip(point.label, { direction: "top", offset: [-15, -10] });
-  compute();
+  startCompute();
 }
 
-for (const el of [ui.mode, ui.sampling, ui.radius, ui.density]) {
-  el.addEventListener("change", () => { if (origin) compute(); });
+/** Run compute() and surface any failure in the status line instead of dying silently. */
+function startCompute() {
+  compute().catch((err) => {
+    if (err?.name === "AbortError") return;
+    console.error(err);
+    setStatus(
+      `Something went wrong: ${err?.message ?? err}. Click the map or change a setting to retry.`,
+      "error");
+  });
 }
+
+// Debounce rapid setting changes so flipping through options fires one
+// computation (each Overpass/OSRM round is expensive and rate-limited).
+let settingsTimer;
+for (const el of [ui.mode, ui.sampling, ui.radius, ui.density]) {
+  el.addEventListener("change", () => {
+    if (!origin) return;
+    clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(startCompute, 350);
+  });
+}
+
+// Last-resort net: anything that escapes startCompute (or event handlers)
+// still produces a visible message instead of a frozen UI.
+window.addEventListener("unhandledrejection", (e) => {
+  if (e.reason?.name === "AbortError") return;
+  console.error(e.reason);
+  setStatus(`Unexpected error: ${e.reason?.message ?? e.reason}`, "error");
+});
+window.addEventListener("error", (e) => {
+  setStatus(`Unexpected error: ${e.message}`, "error");
+});
 
 ui.opacity.addEventListener("input", () => {
   cellLayer.eachLayer((layer) => layer.setStyle({ fillOpacity: fillOpacity() }));
@@ -185,6 +214,9 @@ async function compute() {
     }).addTo(cellLayer);
     return { point, layer, minutes: null, unreliable: false, done: false };
   });
+  if (!cells.some((c) => c.layer)) {
+    throw new Error("could not build any map cells for this area");
+  }
 
   const cellStyle = (cell) => ({
     fillColor: cell.minutes === null || cell.unreliable

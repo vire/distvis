@@ -1,6 +1,12 @@
 // Real road-network nodes (motorway exits + significant crossings) from the
 // Overpass API, used as Voronoi seeds instead of an arbitrary grid.
 
+import { timeoutSignal } from "./routing.js";
+
+// Overpass can be slow on large areas; cap the wait so the app can fall back
+// to the hex grid instead of hanging.
+const OVERPASS_TIMEOUT_MS = 45000;
+
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
@@ -17,7 +23,7 @@ const MAJOR_ROADS = "motorway|trunk|primary";
  */
 export async function fetchRoadNodes(origin, radiusKm, signal) {
   const around = `(around:${Math.round(radiusKm * 1000)},${origin.lat.toFixed(5)},${origin.lng.toFixed(5)})`;
-  const query = `[out:json][timeout:90];
+  const query = `[out:json][timeout:45];
 way[highway~"^(${MAJOR_ROADS})$"]${around}->.roads;
 (
   node[highway=motorway_junction]${around};
@@ -31,7 +37,7 @@ out skel qt;`;
       const res = await fetch(endpoint, {
         method: "POST",
         body: new URLSearchParams({ data: query }),
-        signal,
+        signal: timeoutSignal(signal, OVERPASS_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
       const data = await res.json();
