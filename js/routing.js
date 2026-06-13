@@ -17,6 +17,25 @@ const DETOUR_FACTOR = 1.3;
 // Keep table requests well under public-server limits (1 source + N dests).
 const BATCH_SIZE = 99;
 
+// Per-request timeout so a hung public API degrades to fallback instead of
+// stalling the app indefinitely.
+const REQUEST_TIMEOUT_MS = 30000;
+
+/**
+ * Signal that aborts when `parent` aborts (AbortError, propagated) or after
+ * `ms` elapses (TimeoutError — deliberately distinct so callers treat a
+ * timeout as a failure to fall back from, not as a user cancellation).
+ */
+export function timeoutSignal(parent, ms) {
+  const ctl = new AbortController();
+  if (parent) {
+    if (parent.aborted) ctl.abort(parent.reason);
+    else parent.addEventListener("abort", () => ctl.abort(parent.reason), { once: true });
+  }
+  setTimeout(() => ctl.abort(new DOMException("Request timed out", "TimeoutError")), ms);
+  return ctl.signal;
+}
+
 /**
  * Returns travel durations in seconds from `origin` to every point in
  * `points` (null = unreachable), plus `snapMeters`: how far OSRM had to move
@@ -54,7 +73,7 @@ async function osrmTable(profile, origin, destinations, signal) {
     .map((p) => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`)
     .join(";");
   const url = `${OSRM_BASE}/${profile}/table/v1/driving/${coords}?sources=0&annotations=duration`;
-  const res = await fetch(url, { signal });
+  const res = await fetch(url, { signal: timeoutSignal(signal, REQUEST_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
   const data = await res.json();
   if (data.code !== "Ok" || !data.durations?.[0]) {
