@@ -11,8 +11,23 @@
 <body>
   <div id="map"></div>
 
+  <button id="panel-badge" class="panel-badge" type="button" hidden aria-label="Open controls" aria-expanded="false">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="9" cy="6" r="2.4" fill="currentColor" stroke="none" /><circle cx="15" cy="12" r="2.4" fill="currentColor" stroke="none" /><circle cx="8" cy="18" r="2.4" fill="currentColor" stroke="none" />
+    </svg>
+    <span id="badge-label">Controls</span>
+  </button>
+
   <div id="panel" class="ui-card">
-    <h1>distvis</h1>
+    <div class="panel-header">
+      <h1>distvis</h1>
+      <button id="minimize-btn" class="icon-btn" type="button" aria-label="Minimize panel" title="Minimize">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="17" x2="18" y2="17" />
+        </svg>
+      </button>
+    </div>
     <p class="hint">Click the map or search a place to set the origin. Cells are colored by travel time from it.</p>
 
     <form id="search-form" autocomplete="off">
