@@ -17,6 +17,10 @@ const DETOUR_FACTOR = 1.3;
 // Keep table requests well under public-server limits (1 source + N dests).
 const BATCH_SIZE = 99;
 
+// Run several table requests at once so routing isn't a long serial wait,
+// while staying gentle on the public OSRM instances.
+const CONCURRENCY = 4;
+
 // Per-request timeout so a hung public API degrades to fallback instead of
 // stalling the app indefinitely.
 const REQUEST_TIMEOUT_MS = 30000;
@@ -49,8 +53,12 @@ export async function travelTimes(origin, points, mode, { signal, onProgress } =
   const durations = new Array(points.length).fill(null);
   const snapMeters = new Array(points.length).fill(0);
   let usedEstimate = false;
+  let completed = 0;
 
-  for (let start = 0; start < points.length; start += BATCH_SIZE) {
+  const starts = [];
+  for (let s = 0; s < points.length; s += BATCH_SIZE) starts.push(s);
+
+  const runBatch = async (start) => {
     signal?.throwIfAborted();
     const batch = points.slice(start, start + BATCH_SIZE);
     try {
@@ -62,8 +70,17 @@ export async function travelTimes(origin, points, mode, { signal, onProgress } =
       usedEstimate = true;
       batch.forEach((p, i) => { durations[start + i] = estimateSeconds(origin, p, mode); });
     }
-    onProgress?.(Math.min(start + BATCH_SIZE, points.length), points.length, durations, snapMeters);
-  }
+    completed += batch.length;
+    onProgress?.(completed, points.length, durations, snapMeters);
+  };
+
+  // Pull batches off a shared queue with a fixed number of workers.
+  let next = 0;
+  const worker = async () => {
+    while (next < starts.length) await runBatch(starts[next++]);
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, starts.length) }, worker));
 
   return { durations, snapMeters, source: usedEstimate ? "estimate" : "osrm" };
 }

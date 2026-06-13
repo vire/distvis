@@ -15,25 +15,31 @@ pipeline explains most visual quirks:
 ### 1. Sampling
 
 Each Voronoi cell shows the travel time **to its seed point** — everything
-inside a cell gets that one value. Two seeding strategies (the **Cells**
-selector):
+inside a cell gets that one value. The **Cell size** setting picks the target
+spacing (5–40 km, default 10 km). To stay responsive, the number of routed
+points is capped at ~1200: at large radii the cell size is automatically
+enlarged to fit (the status line says so), so e.g. a 50–200 km radius gets
+true 10 km cells while a 450 km radius coarsens to ~25 km. Two seeding
+strategies (the **Cells** selector):
 
-- **Road junctions (default).** Real road-network nodes fetched from the
+- **Hex grid (default, fast).** A uniform hexagonal grid over the radius
+  (`js/geo.js`). No extra network call, so the map responds immediately on
+  click. Points snapped far from any road are grayed (see Snapping below).
+- **Road junctions.** Real road-network nodes fetched from the
   [Overpass API](https://overpass-api.de) (`js/nodes.js`): motorway exits
   (`highway=motorway_junction`) plus significant crossings — nodes shared by
-  3+ motorway/trunk/primary ways. These are then spatially thinned to roughly
-  one node per `radius / 8|12|18` km bucket (Detail setting) so the routing
-  request count stays bounded. Cells follow the actual road network: dense
-  along corridors, sparse in the countryside — and every seed lies *on* a
-  road, so there are no snapping artifacts. If the junction lookup fails or
-  the area has too few major roads, the app falls back to the hex grid.
-- **Hex grid.** A uniform hexagonal grid over the radius (`js/geo.js`),
-  e.g. 300 km radius at Medium detail ⇒ ~25 km spacing ⇒ ~520 points.
+  3+ motorway/trunk/primary ways — then spatially thinned to one node per
+  cell-size bucket. Cells follow the actual road network and every seed lies
+  *on* a road, so there are no snapping artifacts. The trade-off is the
+  Overpass query (heavy for large radii, several seconds); results are cached
+  per area, and the app falls back to the hex grid if the lookup fails or the
+  area has too few major roads.
 
 ### 2. Routing (the real data path)
 
 Travel times come from the public [FOSSGIS OSRM](https://routing.openstreetmap.de)
-`table` service (`js/routing.js`), one HTTP request per batch of ≤99 points:
+`table` service (`js/routing.js`), in batches of ≤99 points run up to 4 at a
+time so routing isn't a long serial wait:
 
 ```
 GET /routed-car/table/v1/driving/{origin};{p1};…;{p99}?sources=0&annotations=duration
@@ -83,9 +89,9 @@ minutes — the tooltip is always the ground truth.
 
 - **Search / map click** — set the origin point.
 - **Mode** — car, bike, or foot routing profile.
-- **Cells** — Voronoi seeds: real road junctions (default) or a uniform hex grid.
+- **Cells** — Voronoi seeds: uniform hex grid (default, fast) or road junctions.
 - **Radius** — how far out to sample (50–450 km).
-- **Detail** — grid density (finer = more cells = more API batches).
+- **Cell size** — target spacing of the cells (5–40 km; auto-enlarged at large radii).
 - **Opacity** — overlay transparency.
 
 ## Running
