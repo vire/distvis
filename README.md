@@ -61,10 +61,17 @@ Important properties of this data:
 - The bike/foot modes use the corresponding OSRM profiles (`routed-bike`,
   `routed-foot`).
 
-### 3. Fallback (the fake data path)
+### 3. Rate limits & fallback
 
-If the OSRM request fails (offline, rate-limited, CORS), the app silently
-degrades to a crow-flies estimate:
+`routing.openstreetmap.de` is a **free shared demo server** run by FOSSGIS, with
+no API key and strict rate limiting — bursts of `table` requests return
+`429 Too Many Requests`. To stay within it the app keeps concurrency low (2),
+caches results per view, and **retries 429/5xx batches with exponential backoff**
+(honoring any `Retry-After` header) before giving up — so a transient burst
+recovers real data instead of dropping straight to estimates.
+
+If a batch still fails after retries (offline, persistent rate limit, CORS),
+the app degrades to a crow-flies estimate:
 
 ```
 time = haversine_distance × 1.3 (detour factor) / speed   (car 75, bike 16, foot 4.5 km/h)
@@ -111,3 +118,20 @@ then open <http://localhost:8000>.
 
 Leaflet and d3-delaunay are loaded from CDNs; routing and geocoding use free
 public OSM services (please be gentle with them).
+
+## Avoiding routing rate limits
+
+The `429 Too Many Requests` errors come from the shared FOSSGIS demo server,
+which isn't meant for bulk use. The in-app mitigations (low concurrency, backoff
+retries, result caching) reduce them but can't raise a limit on a server you
+don't control. To eliminate them, point `OSRM_BASE` in `js/routing.js` at a
+backend with real quota:
+
+- **Self-host OSRM** — run the [OSRM backend](https://github.com/Project-OSRM/osrm-backend)
+  in Docker against an OSM extract (e.g. from [Geofabrik](https://download.geofabrik.de)).
+  No shared limits; the `table` request shape is identical, so only the base URL changes.
+- **A keyed routing API** — e.g. [OpenRouteService](https://openrouteservice.org)
+  (free tier with an API key) or Mapbox. These need their own matrix-endpoint
+  request format and an API key, so the `osrmTable()` call would need adapting.
+
+Self-hosting is the closest drop-in. Happy to wire either up on request.
