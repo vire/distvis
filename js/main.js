@@ -23,6 +23,10 @@ let originMarker = null;
 // --- UI elements -----------------------------------------------------------
 
 const ui = {
+  panel: document.getElementById("panel"),
+  minimizeBtn: document.getElementById("minimize-btn"),
+  badge: document.getElementById("panel-badge"),
+  badgeLabel: document.getElementById("badge-label"),
   mode: document.getElementById("mode"),
   sampling: document.getElementById("sampling"),
   radius: document.getElementById("radius"),
@@ -38,6 +42,25 @@ const ui = {
 };
 
 ui.legendBar.style.background = cssGradient();
+
+// --- Panel collapse (minimize to a badge, mainly for phones) ----------------
+
+const isNarrow = () => window.matchMedia("(max-width: 560px)").matches;
+
+function collapsePanel() {
+  ui.panel.classList.add("collapsed");
+  ui.badge.hidden = false;
+  ui.badge.setAttribute("aria-expanded", "false");
+}
+
+function expandPanel() {
+  ui.panel.classList.remove("collapsed");
+  ui.badge.hidden = true;
+  ui.badge.setAttribute("aria-expanded", "true");
+}
+
+ui.minimizeBtn.addEventListener("click", collapsePanel);
+ui.badge.addEventListener("click", expandPanel);
 
 function setStatus(text, kind = "") {
   ui.status.textContent = text;
@@ -105,6 +128,10 @@ function setOrigin(point) {
   originMarker = L.marker([point.lat, point.lng], { title: point.label })
     .addTo(map)
     .bindTooltip(point.label, { direction: "top", offset: [-15, -10] });
+  // Show the chosen place on the reopen badge, and on phones collapse the
+  // panel so the freshly rendered map isn't hidden behind the controls.
+  ui.badgeLabel.textContent = point.label;
+  if (isNarrow()) collapsePanel();
   startCompute();
 }
 
