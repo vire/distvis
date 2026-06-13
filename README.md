@@ -33,7 +33,11 @@ from the origin.
 
 ## Running
 
-Plain static files, no build step — but ES modules need an HTTP server:
+Pushes to `main` deploy automatically to GitHub Pages via
+`.github/workflows/deploy-pages.yml`.
+
+For local development — plain static files, no build step — ES modules just
+need an HTTP server:
 
 ```sh
 python3 -m http.server 8000
