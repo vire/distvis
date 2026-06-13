@@ -19,7 +19,8 @@ const BATCH_SIZE = 99;
 
 /**
  * Returns travel durations in seconds from `origin` to every point in
- * `points` (null = unreachable). `onProgress(done, total)` reports batches.
+ * `points` (null = unreachable). `onProgress(done, total, durations)` reports
+ * batches with the partially filled durations array.
  * Resolves `{ durations, source }` where source is "osrm" or "estimate".
  */
 export async function travelTimes(origin, points, mode, { signal, onProgress } = {}) {
@@ -38,7 +39,7 @@ export async function travelTimes(origin, points, mode, { signal, onProgress } =
       usedEstimate = true;
       batch.forEach((p, i) => { durations[start + i] = estimateSeconds(origin, p, mode); });
     }
-    onProgress?.(Math.min(start + BATCH_SIZE, points.length), points.length);
+    onProgress?.(Math.min(start + BATCH_SIZE, points.length), points.length, durations);
   }
 
   return { durations, source: usedEstimate ? "estimate" : "osrm" };

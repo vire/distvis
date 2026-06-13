@@ -183,9 +183,9 @@ async function compute() {
   try {
     const { durations, source } = await travelTimes(origin, inner, mode, {
       signal,
-      onProgress: (done, total) => {
+      onProgress: (done, total, partial) => {
         if (signal.aborted) return;
-        colorize(durations, done);
+        colorize(partial, done);
         setStatus(`Routing… ${done}/${total} points`, "working");
       },
     });
