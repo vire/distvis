@@ -79,7 +79,8 @@ begin
 
   -- Value sanity: no negatives; nothing implausibly large for the country.
   select count(*) into bad_val from dist.matrix_stage
-   where seconds is not null and (seconds < 0 or seconds > 25200);  -- 7 h cap
+   where seconds is not null and (seconds < 0 or seconds > 36000);  -- 10 h cap
+   -- (CZ extremes + remote-seed access detours legitimately reach ~8 h; >10 h would signal a unit/placement bug)
   assert bad_val = 0, format('%s seconds values out of range [0, 25200]', bad_val);
 
   raise notice 'U4 validation gate passed (N=% seeds)', n;
