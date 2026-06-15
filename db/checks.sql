@@ -140,3 +140,52 @@ $$;
 -- Atomic-swap correctness (structural): confirm load.sql wraps the renames +
 -- active flip in a single BEGIN..COMMIT. Atomicity follows from PG transactional
 -- DDL; no concurrent-reader harness is needed (this project has no test runner).
+
+-- ===========================================================================
+-- U5 — retrieval RPC (run after db/rpc.sql AND a loaded snapshot)
+-- ===========================================================================
+do $$
+declare
+  sig text := 'api.cells_around(double precision,double precision,smallint,double precision)';
+  doc jsonb;
+begin
+  -- Privilege: anon may execute, public may not.
+  assert has_function_privilege('anon', sig, 'EXECUTE'),
+    'anon cannot EXECUTE api.cells_around';
+  assert not has_function_privilege('public', sig, 'EXECUTE'),
+    'public must not be able to EXECUTE api.cells_around';
+
+  -- Happy path: central Prague, car, 50 km.
+  doc := api.cells_around(14.42, 50.08, 0::smallint, 50000);
+  assert doc->>'status' = 'ok', format('expected ok, got %s', doc->>'status');
+  assert jsonb_array_length(doc->'cells') >= 3, 'happy-path returned too few cells';
+  assert (doc->>'snapMeters') is not null, 'snapMeters missing';
+  assert (doc#>>'{version,extractDate}') is not null, 'version.extractDate missing';
+
+  -- Out of coverage: Vienna (lat < 48.5) -> typed state, no exception.
+  assert api.cells_around(16.37, 48.21, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+    'Vienna should be out_of_coverage';
+
+  -- Input hardening: NaN / null coerce to out_of_coverage, not an error.
+  assert api.cells_around('NaN'::double precision, 50.0, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+    'NaN lng should be out_of_coverage';
+  assert api.cells_around(null, null, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+    'null coords should be out_of_coverage';
+
+  -- Mode whitelist: a mode absent from the snapshot.
+  assert api.cells_around(14.42, 50.08, 9::smallint, 50000)->>'status' = 'mode_unavailable',
+    'unknown mode should be mode_unavailable';
+
+  -- Radius too small: 0 m radius yields < MIN_CELLS.
+  assert api.cells_around(14.42, 50.08, 0::smallint, 0)->>'status' = 'radius_too_small',
+    'zero radius should be radius_too_small';
+
+  -- Radius clamp: an absurd radius must not error and must stay capped.
+  assert api.cells_around(14.42, 50.08, 0::smallint, 9e12)->>'status' = 'ok',
+    'oversized radius should clamp, not error';
+  assert jsonb_array_length(api.cells_around(14.42, 50.08, 0::smallint, 9e12)->'cells') <= 5000,
+    'cell cap (5000) not enforced';
+
+  raise notice 'U5 RPC checks passed';
+end
+$$;
