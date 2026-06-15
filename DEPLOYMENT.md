@@ -57,21 +57,23 @@ previous snapshot kept as `*_prev` for rollback).
    generates them for you:
    - `SERVICE_PASSWORD_POSTGRES`, `SERVICE_USER_POSTGRES` — the database
      superuser/owner credentials.
-   - `SERVICE_PASSWORD_AUTHENTICATOR` — one value injected into **both** the DB
-     (to set the `authenticator` role's password on first boot) and PostgREST
-     (as `PGPASSWORD`), so they always match.
+   - `SERVICE_PASSWORD_AUTHENTICATOR` — one value injected into **both** the
+     `db-init` reconcile and PostgREST (as `PGPASSWORD`), so they always match.
    - `SERVICE_FQDN_POSTGREST_3000` — a public TLS domain routed to PostgREST's
      port 3000. This URL is your `POSTGREST_BASE`.
-3. Deploy. On **first boot** the database runs, in order, the files mounted into
-   `/docker-entrypoint-initdb.d`:
-   - `db/schema.sql` — PostGIS, the private `dist` schema, the exposed `api`
-     schema, RLS, and the `anon` role.
-   - `db/rpc.sql` — the `api.cells_around` read function + grants.
-   - `initdb/30-authenticator.sh` — creates the `authenticator` login role with
-     the generated password and `grant anon to authenticator`.
+3. Deploy. On **first boot** the database runs `db/schema.sql` (PostGIS, the
+   private `dist` schema, the exposed `api` schema, RLS, the `anon` role) and
+   `db/rpc.sql` (the `api.cells_around` function + grants) from
+   `/docker-entrypoint-initdb.d`. These run only on an empty volume.
 
-   (These init scripts run only when the data volume is empty. Schema changes
-   later are applied by hand — see Refreshing.)
+   The `authenticator` **login** role is handled separately by the `db-init`
+   service, which runs on **every** deploy: it creates the role if missing and
+   re-sets its password to the current `SERVICE_PASSWORD_AUTHENTICATOR`, then
+   grants it `anon`. PostgREST waits for `db-init` to finish. This is what keeps
+   the role's password from drifting out of sync with PostgREST (the failure
+   mode where PostgREST crash-loops on `password authentication failed for user
+   "authenticator"`). Later schema changes in `db/*.sql` are applied by hand —
+   see Refreshing.
 4. **Verify exposure** once it's up: `GET https://<api-domain>/seed` and
    `/matrix` must return nothing (404 / empty) — only `/rpc/cells_around` is
    reachable. This is the `db-schemas=api` boundary (KTD8 / code-review #13);
