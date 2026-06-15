@@ -54,5 +54,115 @@ services:
       db:
         condition: service_healthy
 
+  # ---------------------------------------------------------------------------
+  # Precompute pipeline (profile: precompute) — a ONE-SHOT batch job, NOT
+  # always-on. A normal `docker compose up` (deploy) starts only db + postgrest;
+  # these run only with the profile. Build/refresh the matrix on demand from
+  # Coolify's terminal:
+  #   docker compose --profile precompute up        # fetch->build->serve->matrix->load, then the one-shots exit
+  #   docker compose stop osrm-routed               # free the OSRM server's RAM afterward
+  # The OSM extract + contracted graph + CSV outputs persist in named volumes,
+  # so re-runs skip the download/extract. OSRM is only needed while the matrix
+  # builds. db/postgrest are left running throughout.
+  # ---------------------------------------------------------------------------
+
+  osrm-fetch:
+    profiles: ["precompute"]
+    image: curlimages/curl:latest
+    volumes:
+      - osrm-graph:/data
+    command:
+      - sh
+      - -c
+      - test -f /data/czech-republic-latest.osm.pbf || curl -fL -o /data/czech-republic-latest.osm.pbf https://download.geofabrik.de/europe/czech-republic-latest.osm.pbf
+
+  osrm-build:
+    profiles: ["precompute"]
+    image: ghcr.io/project-osrm/osrm-backend
+    volumes:
+      - osrm-graph:/data
+    depends_on:
+      osrm-fetch:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - test -f /data/czech-republic-latest.osrm.hsgr || (osrm-extract -p /opt/car.lua /data/czech-republic-latest.osm.pbf && osrm-contract /data/czech-republic-latest.osrm)
+
+  osrm-routed:
+    profiles: ["precompute"]
+    image: ghcr.io/project-osrm/osrm-backend
+    volumes:
+      - osrm-graph:/data
+    depends_on:
+      osrm-build:
+        condition: service_completed_successfully
+    command: osrm-routed --algorithm ch --max-table-size 8000 /data/czech-republic-latest.osrm
+
+  # seeds.mjs + build-matrix.mjs → /out (shared volume). Reads scripts from the
+  # repo bind; waits for OSRM to answer before building.
+  precompute:
+    profiles: ["precompute"]
+    image: node:20-slim
+    working_dir: /repo/precompute
+    volumes:
+      - .:/repo:ro
+      - precompute-out:/out
+    environment:
+      OUT_DIR: /out
+      OSRM_CAR: http://osrm-routed:5000
+      SEED_SPACING_KM: "5"
+    depends_on:
+      osrm-routed:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo "waiting for OSRM to be ready..."
+        for i in $$(seq 1 90); do
+          if node -e "fetch(process.env.OSRM_CAR+'/table/v1/driving/14.42,50.08?sources=0&annotations=duration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then break; fi
+          sleep 2
+        done
+        node seeds.mjs && node build-matrix.mjs
+
+  # Loads /out into the live DB via load.sql (staging → validate → atomic swap),
+  # connecting as the DB owner (DDL + swap need owner privileges), then checks.sql.
+  precompute-load:
+    profiles: ["precompute"]
+    image: postgres:16
+    working_dir: /out
+    volumes:
+      - .:/repo:ro
+      - precompute-out:/out
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: distvis
+      PGUSER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      EXTRACT_DATE: ""                 # blank → defaults to today's date at load time
+      PROFILE_VERSION: "osrm car (ch)"
+      SEED_SPACING_KM: "5"
+    depends_on:
+      precompute:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        cd /out
+        psql -v ON_ERROR_STOP=1 \
+          -v extract_date="$${EXTRACT_DATE:-$$(date +%F)}" \
+          -v profile_version="$${PROFILE_VERSION}" \
+          -v seed_spacing_km="$${SEED_SPACING_KM}" \
+          -v seed_set_hash="$$(cat /out/seed_set_hash.txt)" \
+          -f /repo/precompute/load.sql
+        psql -v ON_ERROR_STOP=1 -f /repo/db/checks.sql
+
 volumes:
   distvis-db-data:
+  osrm-graph:
+  precompute-out:

@@ -21,6 +21,9 @@ import { dirname, join } from "node:path";
 import { once } from "node:events";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+// Reads seeds.csv from / writes matrix.csv to OUT_DIR (defaults to this folder
+// for local runs; the Coolify container points it at a shared volume).
+const OUT = process.env.OUT_DIR ?? HERE;
 
 // Single car OSRM endpoint (one single-profile osrm-routed).
 const OSRM_BASE = process.env.OSRM_CAR ?? "http://localhost:5000";
@@ -30,7 +33,7 @@ const REQUEST_TIMEOUT_MS = 120000;
 const MAX_RETRIES = 3;
 
 // --- Load seeds in file order (index i <-> seeds[i]) -------------------------
-const lines = readFileSync(join(HERE, "seeds.csv"), "utf8").trim().split("\n");
+const lines = readFileSync(join(OUT, "seeds.csv"), "utf8").trim().split("\n");
 if (lines[0] !== "id,lng,lat") throw new Error("seeds.csv: unexpected header — run seeds.mjs first");
 const seeds = lines.slice(1).map((l) => {
   const [id, lng, lat] = l.split(",");
@@ -40,7 +43,7 @@ const N = seeds.length;
 console.log(`[matrix] ${N} seeds, tiles ${SRC_BATCH}x${DEST_BATCH}, car only`);
 
 // --- Backpressure-aware CSV sink --------------------------------------------
-const out = createWriteStream(join(HERE, "matrix.csv"));
+const out = createWriteStream(join(OUT, "matrix.csv"));
 async function emit(line) {
   if (!out.write(line)) await once(out, "drain");
 }
@@ -117,7 +120,7 @@ await once(out, "finish");
 
 // Record what was produced for the load step's cardinality gate (U4).
 writeFileSync(
-  join(HERE, "matrix.meta.json"),
+  join(OUT, "matrix.meta.json"),
   JSON.stringify({ seeds: N, rows, nulls, expectedRows: N * N }, null, 2) + "\n"
 );
 console.log(`[matrix] done: ${rows} rows (${nulls} null/unreachable) -> matrix.csv  expected ${N * N}`);

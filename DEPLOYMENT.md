@@ -79,27 +79,46 @@ frontend domain from step 4) and `<router-name>` with the router Coolify
 generated for the PostgREST service. CORS is defense-in-depth; the real boundary
 is the RPC hardening in `db/rpc.sql`.
 
-## 3. Load the precomputed matrix
+## 3. Build & load the matrix (precompute profile)
 
-1. Build the matrix locally (Docker OSRM, car profile) per
-   `precompute/README.md` → `precompute/seeds.csv` + `precompute/matrix.csv`.
-2. From the `precompute/` directory, load and publish against the Coolify
-   database (so `\copy` finds the CSVs), then verify. Use the DB connection
-   Coolify shows for the resource:
+The matrix build is a **one-shot batch job** baked into the same compose under
+the `precompute` profile — so it does **not** run on a normal deploy. Trigger it
+on demand from the Coolify resource's **terminal** (or a Coolify Scheduled Task
+for periodic refreshes):
 
-   ```sh
-   cd precompute
-   psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 \
-     -v extract_date="2026-06-14" \
-     -v profile_version="osrm-5.x ch (car)" \
-     -v seed_spacing_km=5 \
-     -v seed_set_hash="$(jq -r .seedSetHash seeds.meta.json)" \
-     -f load.sql
-   psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 -f ../db/checks.sql
-   ```
+```sh
+# Detached so the one-shots run to completion without tearing down db/postgrest.
+# Chain: download CZ extract → osrm-extract+contract → serve → seeds.mjs +
+# build-matrix.mjs → load.sql + checks.sql.
+docker compose --profile precompute up -d
+docker compose logs -f precompute-load   # watch until it exits 0 ("U5 RPC checks passed")
 
-   `load.sql` ends with `NOTIFY pgrst, 'reload schema'`. If PostgREST doesn't
-   pick up the swapped tables, **restart the PostgREST service in Coolify**.
+# Then free the OSRM server's RAM (db + postgrest stay running):
+docker compose stop osrm-routed
+```
+
+> Don't use `--abort-on-container-exit` here — it would stop the always-on `db`
+> and `postgrest` when the load step finishes. Detached `up -d` lets the one-shot
+> steps exit on their own while the production services keep serving.
+
+What happens, and why it's safe to leave in the production compose:
+
+- The OSM extract, contracted graph, and CSV outputs persist in named volumes
+  (`osrm-graph`, `precompute-out`), so re-runs skip the download/extract.
+- The Node step writes to the shared `precompute-out` volume; the load step
+  (Postgres image) runs `load.sql` against the live `db` **as the DB owner**
+  (the staging + atomic swap need owner privileges) and then `db/checks.sql`.
+- `load.sql` ends with `NOTIFY pgrst, 'reload schema'`. If PostgREST doesn't pick
+  up the swapped tables, **restart the PostgREST service in Coolify**.
+
+To refresh later, re-run the same command (optionally set `EXTRACT_DATE` on the
+`precompute-load` service to the extract's real date; it defaults to the run
+date). Delete the `osrm-graph` volume first if you want a fresh OSM download.
+
+> Prefer to build locally instead? The same scripts run on your machine via
+> `precompute/docker-compose.yml` (OSRM) + `node seeds.mjs && node
+> build-matrix.mjs`, then `psql … -f precompute/load.sql` against the Coolify DB.
+> See `precompute/README.md`.
 
 ## 4. Frontend
 

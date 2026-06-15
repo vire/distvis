@@ -23,6 +23,9 @@ import { dirname, join } from "node:path";
 import { offsetKm, KM_PER_DEG_LAT, KM_PER_DEG_LNG_EQUATOR } from "../js/geo.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+// Output dir: defaults to this folder for local runs; the Coolify precompute
+// container sets OUT_DIR to a shared volume the load step reads.
+const OUT = process.env.OUT_DIR ?? HERE;
 
 // --- Config (launch target: 5 km, KTD10) -----------------------------------
 const SPACING_KM = Number(process.env.SEED_SPACING_KM ?? 5);
@@ -101,16 +104,18 @@ const hash = createHash("sha256");
 for (const s of seeds) hash.update(`${s.id},${round6(s.lng)},${round6(s.lat)}\n`);
 const seedSetHash = hash.digest("hex");
 
-// --- Write -------------------------------------------------------------------
+// --- Write (to OUT_DIR) ------------------------------------------------------
 const csv = "id,lng,lat\n" + seeds.map((s) => `${s.id},${round6(s.lng)},${round6(s.lat)}`).join("\n") + "\n";
-writeFileSync(join(HERE, "seeds.csv"), csv);
+writeFileSync(join(OUT, "seeds.csv"), csv);
 writeFileSync(
-  join(HERE, "seeds.meta.json"),
+  join(OUT, "seeds.meta.json"),
   JSON.stringify(
     { seedSetHash, count: seeds.length, spacingKm: SPACING_KM, bbox: BBOX, anchor: ANCHOR, colStride: COL_STRIDE, clippedToBoundary: Boolean(boundary) },
     null,
     2
   ) + "\n"
 );
+// Bare hash file so the load step can pass it to load.sql without a JSON parser.
+writeFileSync(join(OUT, "seed_set_hash.txt"), seedSetHash + "\n");
 
-console.log(`[seeds] ${seeds.length} seeds @ ${SPACING_KM} km -> seeds.csv  (seed_set_hash ${seedSetHash.slice(0, 12)}…)`);
+console.log(`[seeds] ${seeds.length} seeds @ ${SPACING_KM} km -> ${OUT}/seeds.csv  (seed_set_hash ${seedSetHash.slice(0, 12)}…)`);

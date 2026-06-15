@@ -148,6 +148,7 @@ vite.config.ts.timestamp-*
 # distvis precompute — generated artifacts (built locally, never deployed)
 precompute/seeds.csv
 precompute/seeds.meta.json
+precompute/seed_set_hash.txt
 precompute/matrix.csv
 precompute/matrix.meta.json
 precompute/*.osm.pbf
