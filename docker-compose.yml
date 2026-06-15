@@ -10,9 +10,9 @@
 # password it injects into both the DB init and PostgREST, and a public TLS
 # domain for the API — so there are no secrets to commit.
 #
-# On FIRST boot the DB runs db/schema.sql + db/rpc.sql + the authenticator init
-# (mounted into /docker-entrypoint-initdb.d). Load the precomputed matrix
-# afterward with precompute/load.sql (see DEPLOYMENT.md §4).
+# On FIRST boot (empty volume) the DB runs db/schema.sql + db/rpc.sql, BAKED into
+# the image via Dockerfile.db (Coolify ignores host bind-mounts). The matrix is
+# loaded by the `precompute` profile below (also baked) — see DEPLOYMENT.md §3.
 
 services:
   db:
@@ -136,14 +136,17 @@ services:
         condition: service_completed_successfully
     command: osrm-routed --algorithm ch --max-table-size 8000 /data/czech-republic-latest.osrm
 
-  # seeds.mjs + build-matrix.mjs → /out (shared volume). Reads scripts from the
-  # repo bind; waits for OSRM to answer before building.
+  # seeds.mjs + build-matrix.mjs → /out (shared volume). Scripts + the CZ boundary
+  # are BAKED into the image (Dockerfile.precompute) — Coolify ignores host
+  # bind-mounts, so the repo files must live in the image. seeds.mjs clips to the
+  # baked cz-boundary.geojson (~3,600 seeds). Waits for OSRM before building.
   precompute:
     profiles: ["precompute"]
-    image: node:20-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.precompute
     working_dir: /repo/precompute
     volumes:
-      - .:/repo:ro
       - precompute-out:/out
     environment:
       OUT_DIR: /out
@@ -165,12 +168,15 @@ services:
 
   # Loads /out into the live DB via load.sql (staging → validate → atomic swap),
   # connecting as the DB owner (DDL + swap need owner privileges), then checks.sql.
+  # Reuses the baked Dockerfile.precompute image (it bundles psql + load.sql +
+  # db/checks.sql), so no host bind-mount of repo files is needed.
   precompute-load:
     profiles: ["precompute"]
-    image: postgres:16
+    build:
+      context: .
+      dockerfile: Dockerfile.precompute
     working_dir: /out
     volumes:
-      - .:/repo:ro
       - precompute-out:/out
     environment:
       PGHOST: db

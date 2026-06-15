@@ -114,40 +114,28 @@ is the RPC hardening in `db/rpc.sql`.
 
 ## 3. Build & load the matrix
 
-> **Reliable path: run the precompute locally**, then load into the Coolify DB.
-> The in-Coolify `precompute` profile below mounts repo files (`.:/repo`,
-> `seeds.mjs`/`load.sql`), and — like the DB init scripts — **Coolify's compose
-> deploy doesn't honor those host bind-mounts**, so it won't find the scripts.
-> Until the precompute steps are baked into images too, build locally:
->
-> ```sh
-> cd precompute && docker compose up -d            # local OSRM (car)
-> node seeds.mjs && node build-matrix.mjs           # -> seeds.csv, matrix.csv
-> docker compose down
-> psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 \
->   -v extract_date="2026-06-14" -v profile_version="osrm car (ch)" \
->   -v seed_spacing_km=5 -v seed_set_hash="$(cat seed_set_hash.txt)" \
->   -f load.sql
-> psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 -f ../db/checks.sql
-> ```
->
-> `$COOLIFY_DB_URL` is the DB owner connection Coolify shows for the resource.
-
-The `precompute` profile below is the intended in-Coolify path **once its steps
-are baked into images** (tracked as follow-up). It is a **one-shot batch job** —
-it does **not** run on a normal deploy. When baked, trigger it on demand from the
-Coolify resource's **terminal** (or a Scheduled Task):
+The whole pipeline now runs **on the Coolify host** — OSRM build, seed grid,
+matrix build, and load — because the precompute scripts and the CZ boundary are
+**baked into an image** (`Dockerfile.precompute`); like the DB init they are NOT
+bind-mounted (Coolify ignores host bind-mounts). The `precompute` profile is a
+**one-shot batch job** that does **not** run on a normal deploy. Trigger it on
+demand from the Coolify resource's **terminal** (or a Scheduled Task), in the
+compose project directory:
 
 ```sh
 # Detached so the one-shots run to completion without tearing down db/postgrest.
-# Chain: download CZ extract → osrm-extract+contract → serve → seeds.mjs +
-# build-matrix.mjs → load.sql + checks.sql.
-docker compose --profile precompute up -d
+# Chain: download CZ extract → osrm-extract+contract → serve → seeds.mjs (clips to
+# the baked cz-boundary.geojson, ~3,600 seeds) + build-matrix.mjs → load.sql + checks.sql.
+docker compose --profile precompute up -d --build
 docker compose logs -f precompute-load   # watch until it exits 0 ("U5 RPC checks passed")
 
 # Then free the OSRM server's RAM (db + postgrest stay running):
 docker compose stop osrm-routed
 ```
+
+**Host resources:** the one-time OSRM build downloads the ~1 GB CZ extract and
+`osrm-extract` needs a few GB RAM transiently — make sure the Coolify host has the
+headroom and a few GB free disk for the `osrm-graph` + `precompute-out` volumes.
 
 > Don't use `--abort-on-container-exit` here — it would stop the always-on `db`
 > and `postgrest` when the load step finishes. Detached `up -d` lets the one-shot

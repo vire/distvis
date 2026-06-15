@@ -1,0 +1,28 @@
+# Dockerfile.precompute — bakes the precompute pipeline so Coolify's `precompute`
+# profile runs ENTIRELY on the server, with NO host bind-mounts (Coolify does not
+# honor those — the same limitation that forced Dockerfile.db).
+#
+# One image serves both profile steps:
+#   - `precompute`      runs node: seeds.mjs (clips to cz-boundary.geojson) + build-matrix.mjs
+#   - `precompute-load` runs psql: load.sql (staging + atomic swap) + db/checks.sql
+#
+# The repo subtree is mirrored under /repo so seeds.mjs's `../js/geo.js` import
+# and the compose `-f /repo/...` paths resolve unchanged. Generated CSVs are NOT
+# baked — they are written at runtime to the shared `precompute-out` volume (/out).
+FROM node:20-slim
+
+# psql client for the load + checks step.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+COPY js/geo.js                  js/geo.js
+COPY db/checks.sql              db/checks.sql
+COPY precompute/package.json    precompute/package.json
+COPY precompute/seeds.mjs       precompute/seeds.mjs
+COPY precompute/build-matrix.mjs precompute/build-matrix.mjs
+COPY precompute/load.sql        precompute/load.sql
+COPY precompute/cz-boundary.geojson precompute/cz-boundary.geojson
+
+WORKDIR /repo/precompute
