@@ -57,3 +57,36 @@ $$;
 
 -- NOTE (manual, not SQL-checkable here): confirm PostgREST `db-schemas` lists
 -- ONLY `api` (not `dist`/`public`), so a GET /seed or /matrix returns no rows.
+
+-- ===========================================================================
+-- U2 — seed grid (run after dist.seed is loaded)
+-- ===========================================================================
+do $$
+declare
+  n        bigint;
+  near_m   double precision;
+  out_of_box bigint;
+begin
+  select count(*) into n from dist.seed;
+  -- 5 km grid: ~3,600 clipped to the CZ polygon, up to ~6,900 for the raw bbox.
+  assert n between 3000 and 7500, format('unexpected seed count: %s (expected ~3600 clipped / ~6800 bbox at 5 km)', n);
+
+  -- KNN snap from Prague centre returns a seed within ~one grid step.
+  select extensions.st_distance(geom, extensions.st_setsrid(extensions.st_makepoint(14.42, 50.08), 4326)::extensions.geography)
+    into near_m
+    from dist.seed
+    order by geom <-> extensions.st_setsrid(extensions.st_makepoint(14.42, 50.08), 4326)::extensions.geography
+    limit 1;
+  assert near_m < 6000, format('nearest seed to Prague is %s m away (>1 grid step)', near_m);
+
+  -- No seed escaped the Czech bounding box (guards a lat/lng swap or bad anchor).
+  select count(*) into out_of_box from dist.seed
+   where extensions.st_x(geom::extensions.geometry) not between 12.0 and 18.9
+      or extensions.st_y(geom::extensions.geometry) not between 48.5 and 51.1;
+  assert out_of_box = 0, format('%s seeds fall outside the CZ bbox', out_of_box);
+
+  raise notice 'U2 seed checks passed (% seeds)', n;
+end
+$$;
+-- Determinism (manual): re-run precompute/seeds.mjs and confirm seeds.meta.json's
+-- seedSetHash is unchanged, and matches dist.matrix_version.seed_set_hash after load.
