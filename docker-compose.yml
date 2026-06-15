@@ -1,0 +1,58 @@
+# docker-compose.yml — distvis backend for Coolify (Docker Compose resource).
+#
+# Deploys the always-on services: PostgreSQL+PostGIS and PostgREST. The offline
+# OSRM precompute is a different file (precompute/docker-compose.yml) and is NOT
+# deployed here.
+#
+# In Coolify: New Resource → Docker Compose → point it at this repo (this file is
+# the repo-root docker-compose.yml Coolify looks for by default). Coolify
+# substitutes the SERVICE_* "magic" variables below — generating one consistent
+# password it injects into both the DB init and PostgREST, and a public TLS
+# domain for the API — so there are no secrets to commit.
+#
+# On FIRST boot the DB runs db/schema.sql + db/rpc.sql + the authenticator init
+# (mounted into /docker-entrypoint-initdb.d). Load the precomputed matrix
+# afterward with precompute/load.sql (see DEPLOYMENT.md §4).
+
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: distvis
+      POSTGRES_USER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      # Same generated value is injected into PostgREST below.
+      AUTHENTICATOR_PASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
+    volumes:
+      - distvis-db-data:/var/lib/postgresql/data
+      # First-boot provisioning (runs alphabetically, as the superuser):
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - ./db/rpc.sql:/docker-entrypoint-initdb.d/20-rpc.sql:ro
+      - ./initdb/30-authenticator.sh:/docker-entrypoint-initdb.d/30-authenticator.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d distvis"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgrest:
+    image: postgrest/postgrest:latest
+    restart: unless-stopped
+    environment:
+      # Password is supplied via PGPASSWORD (libpq), NOT inline in the URI — so
+      # no credentialed connection string is committed.
+      PGRST_DB_URI: postgres://authenticator@db:5432/distvis
+      PGPASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
+      PGRST_DB_SCHEMAS: api          # ONLY api — keeps dist base tables off REST (KTD8)
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_POOL: 10
+      PGRST_SERVER_PORT: 3000
+      # Coolify generates a TLS domain for this service+port and exposes it.
+      SERVICE_FQDN_POSTGREST_3000: /
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  distvis-db-data:
