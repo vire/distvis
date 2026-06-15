@@ -22,19 +22,47 @@ services:
       POSTGRES_DB: distvis
       POSTGRES_USER: ${SERVICE_USER_POSTGRES:-distvis_owner}
       POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
-      # Same generated value is injected into PostgREST below.
-      AUTHENTICATOR_PASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
     volumes:
       - distvis-db-data:/var/lib/postgresql/data
-      # First-boot provisioning (runs alphabetically, as the superuser):
+      # First-boot-only provisioning (runs alphabetically, as the superuser).
+      # The login `authenticator` role is NOT created here — it's reconciled on
+      # every deploy by db-init below, so its password never drifts from env.
       - ./db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
       - ./db/rpc.sql:/docker-entrypoint-initdb.d/20-rpc.sql:ro
-      - ./initdb/30-authenticator.sh:/docker-entrypoint-initdb.d/30-authenticator.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d distvis"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  # Runs on EVERY deploy (not just first boot): create the `authenticator` login
+  # role if missing and (re)set its password to the current env value, then grant
+  # it `anon`. This is the durable fix for the password-drift restart loop —
+  # initdb scripts only run on an empty volume, so a later password change would
+  # otherwise leave the role stale and crash-loop PostgREST.
+  db-init:
+    image: postgres:16
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: distvis
+      PGUSER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      AUTHENTICATOR_PASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        # tolerate "role already exists"; ALTER + GRANT are idempotent.
+        psql -c "CREATE ROLE authenticator LOGIN" 2>/dev/null || true
+        psql -v ON_ERROR_STOP=1 -v pw="$$AUTHENTICATOR_PASSWORD" \
+          -c "ALTER ROLE authenticator WITH LOGIN PASSWORD :'pw'" \
+          -c "GRANT anon TO authenticator"
+        echo "authenticator role reconciled"
 
   postgrest:
     image: postgrest/postgrest:latest
@@ -53,6 +81,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
   # ---------------------------------------------------------------------------
   # Precompute pipeline (profile: precompute) — a ONE-SHOT batch job, NOT
