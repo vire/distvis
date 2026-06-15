@@ -37,23 +37,6 @@
     <ul id="search-results" hidden></ul>
 
     <div class="row">
-      <label for="mode">Mode</label>
-      <select id="mode">
-        <option value="car" selected>Car</option>
-        <option value="bike">Bike</option>
-        <option value="foot">Foot</option>
-      </select>
-    </div>
-
-    <div class="row">
-      <label for="sampling">Cells</label>
-      <select id="sampling">
-        <option value="grid" selected>Hex grid (fast)</option>
-        <option value="nodes">Road junctions</option>
-      </select>
-    </div>
-
-    <div class="row">
       <label for="radius">Radius</label>
       <select id="radius">
         <option value="50">50 km</option>
@@ -61,16 +44,6 @@
         <option value="200">200 km</option>
         <option value="300" selected>300 km (country)</option>
         <option value="450">450 km</option>
-      </select>
-    </div>
-
-    <div class="row">
-      <label for="density">Cell size</label>
-      <select id="density">
-        <option value="5">5 km</option>
-        <option value="10" selected>10 km</option>
-        <option value="20">20 km</option>
-        <option value="40">40 km</option>
       </select>
     </div>
 
@@ -88,10 +61,11 @@
     </div>
 
     <p class="credits">
-      Routing: <a href="https://routing.openstreetmap.de" target="_blank" rel="noopener">OSRM / FOSSGIS</a> ·
-      Junctions: <a href="https://overpass-api.de" target="_blank" rel="noopener">Overpass</a> ·
-      Geocoding: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a> ·
-      Falls back to straight-line estimates when the routing API is unavailable.
+      Travel times pre-computed with <a href="https://project-osrm.org" target="_blank" rel="noopener">OSRM</a>
+      over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> data,
+      served from Postgres/<a href="https://postgis.net" target="_blank" rel="noopener">PostGIS</a> ·
+      Geocoding: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a>.
+      Coverage: Czechia. Data date shown in the status line.
     </p>
   </div>
 

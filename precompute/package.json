@@ -1,0 +1,10 @@
+{
+  "name": "distvis-precompute",
+  "private": true,
+  "type": "module",
+  "description": "Offline tooling to build the Czech travel-time matrix (not part of the deployed static site).",
+  "scripts": {
+    "seeds": "node seeds.mjs",
+    "matrix": "node build-matrix.mjs"
+  }
+}

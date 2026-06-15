@@ -141,3 +141,20 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Local scratch directory
+/tmp/
+
+# distvis precompute — generated artifacts (built locally, never deployed)
+precompute/seeds.csv
+precompute/seeds.meta.json
+precompute/seed_set_hash.txt
+precompute/matrix.csv
+precompute/matrix.meta.json
+precompute/*.osm.pbf
+precompute/*.osrm*
+precompute/osrm-data/
+# Never commit PostgREST/DB secrets (R16). Real config values stay out of git;
+# js/config.js ships only the PUBLIC anon JWT + base URL.
+precompute/.pgrest.jwt
+*.pgpass

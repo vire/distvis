@@ -1,8 +1,10 @@
 // Geographic helpers: distances and sample-point grids.
 
 const EARTH_RADIUS_KM = 6371;
-const KM_PER_DEG_LAT = 110.574;
-const KM_PER_DEG_LNG_EQUATOR = 111.32;
+// Exported so offline tooling (precompute/seeds.mjs) shares the same earth model
+// instead of duplicating the literals.
+export const KM_PER_DEG_LAT = 110.574;
+export const KM_PER_DEG_LNG_EQUATOR = 111.32;
 
 export function haversineKm(a, b) {
   const toRad = (d) => (d * Math.PI) / 180;
@@ -21,29 +23,4 @@ export function offsetKm(origin, eastKm, northKm) {
     origin.lng +
     eastKm / (KM_PER_DEG_LNG_EQUATOR * Math.cos((origin.lat * Math.PI) / 180));
   return { lat, lng };
-}
-
-/**
- * Hexagonal grid of sample points centered on `origin`, covering a circle of
- * `radiusKm`. Points slightly beyond the radius (one extra ring) are included
- * and flagged `edge: true`; they participate in the Voronoi tessellation so
- * that boundary cells stay hex-sized, but are not routed or rendered.
- */
-export function hexGrid(origin, radiusKm, spacingKm) {
-  const points = [{ ...origin, distKm: 0, edge: false }];
-  const rowStep = spacingKm * (Math.sqrt(3) / 2);
-  const maxRow = Math.ceil((radiusKm + spacingKm) / rowStep);
-  for (let row = -maxRow; row <= maxRow; row++) {
-    const northKm = row * rowStep;
-    const xOffset = row % 2 === 0 ? 0 : spacingKm / 2;
-    const maxCol = Math.ceil((radiusKm + spacingKm) / spacingKm);
-    for (let col = -maxCol; col <= maxCol; col++) {
-      const eastKm = col * spacingKm + xOffset;
-      if (row === 0 && eastKm === 0) continue;
-      const distKm = Math.hypot(eastKm, northKm);
-      if (distKm > radiusKm + spacingKm) continue;
-      points.push({ ...offsetKm(origin, eastKm, northKm), distKm, edge: distKm > radiusKm });
-    }
-  }
-  return points;
 }

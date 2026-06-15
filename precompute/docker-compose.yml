@@ -1,0 +1,20 @@
+# precompute/docker-compose.yml
+# Single car osrm-routed server for the bulk precompute (U3). Serves a prepared
+# .osrm built from the Czech extract with the car profile — see README.md for
+# the one-time extract+contract steps that populate ./osrm-data/car/.
+#
+# --max-table-size must exceed the tile size used by build-matrix.mjs
+# (SRC_BATCH + DEST_BATCH, default 400). 8000 leaves generous headroom.
+#
+#   docker compose up        # start it
+#   node build-matrix.mjs    # then build the matrix
+#   docker compose down
+
+services:
+  osrm-car:
+    image: ghcr.io/project-osrm/osrm-backend
+    command: osrm-routed --algorithm ch --max-table-size 8000 /data/car/czech-republic-latest.osrm
+    volumes:
+      - ./osrm-data:/data
+    ports:
+      - "5000:5000"
