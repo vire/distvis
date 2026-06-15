@@ -4,90 +4,128 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What this is
 
-A travel-time map: pick an origin, and the surrounding area (up to 450 km) is
-tiled with Voronoi cells colored by driving/biking/walking time from that point.
-It is a **pure static site** — no build step, no bundler, no `package.json`, no
-tests, and no Node.js server despite the "nodejs" framing. ES modules load
-directly in the browser; Leaflet and d3-delaunay come from CDNs.
+A travel-time map for **Czechia**: pick an origin and the surrounding area (up to
+a 450 km radius) is tiled with Voronoi cells colored by driving/biking/walking
+time from that point. Travel times are **pre-computed** (not fetched live) and
+served from Postgres/PostGIS via a PostgREST read endpoint.
+
+The **frontend** is still a pure static site — no build step, no bundler, ES
+modules load directly in the browser; Leaflet and d3-delaunay come from CDNs;
+GitHub Pages serves it. The **backend** is new: a self-hosted Postgres+PostGIS
+holding the precomputed seed-to-seed travel-time matrix, exposed read-only
+through PostgREST. The matrix is built offline by `precompute/` tooling and is
+not part of the deployed site.
 
 ## Running
 
-ES modules need to be served over HTTP (file:// won't work):
+Frontend (static, served over HTTP — `file://` won't work for ES modules):
 
 ```sh
 python3 -m http.server 8000   # or: npx serve
 ```
 
-Then open <http://localhost:8000>. There is nothing to build, lint, or test.
+Set `POSTGREST_BASE` (and `ANON_JWT` if required) in `js/config.js` to point at
+your PostgREST endpoint, or the map will show "data service unavailable".
 
 Pushing to `main` deploys to GitHub Pages via `.github/workflows/deploy-pages.yml`,
-which uploads the repo root verbatim — so paths must stay relative and there is
-no compile step between commit and production.
+which uploads the repo root verbatim after a **secret-guard** step
+(`scripts/check-no-secrets.sh`) — so paths stay relative, there's no compile
+step, and no privileged credential may be tracked.
+
+Backend/data: see `precompute/README.md` for the full runbook (seed grid →
+self-hosted OSRM → matrix → load + atomic swap). SQL lives in `db/`.
 
 ## Architecture
 
-The whole app is one pipeline in `js/main.js` → `compute()`, run on every origin
-change or setting change (debounced 350 ms). The stages:
+Two data paths. Only the online one runs in the deployed site.
 
 ```
-sample points  →  Voronoi tessellation  →  travel times  →  color cells
-  (geo/nodes)        (d3-delaunay)          (routing.js)      (colors.js)
+OFFLINE (one-time / on refresh, precompute/ + db/):
+  CZ extract + seed grid → self-hosted OSRM (per profile) → matrix.csv
+    → COPY into Postgres staging → validate → atomic swap (versioned snapshot)
+
+ONLINE (per origin, the deployed app):
+  click → datasource.fetchCells → PostgREST api.cells_around
+    → snap origin to nearest seed (PostGIS KNN) + radius filter
+    → {seed, snapMeters, cells, modes, version} → Voronoi → color
 ```
 
-Modules (all browser ES modules, no framework):
+Frontend modules (browser ES modules, no framework):
 
 - **`js/main.js`** — orchestration, Leaflet map, UI wiring, the `compute()`
-  pipeline, result cache, legend, tooltips.
-- **`js/geo.js`** — `haversineKm`, `offsetKm`, and `hexGrid` (the default
-  sampling).
-- **`js/nodes.js`** — alternate "road junctions" sampling via the Overpass API
-  (`fetchRoadNodes` + `thinNodes`).
-- **`js/routing.js`** — the real data path: OSRM `table` lookups with
-  concurrency, retry/backoff, and a straight-line fallback.
+  pipeline (fetch payload → build Voronoi → color), result cache, legend, tooltips.
+- **`js/datasource.js`** — the ONLY transport-aware module: calls the PostgREST
+  RPC and returns the frontend's own `{ seed, snapMeters, cells, modes, version }`
+  shape. The backend can be swapped here without touching `compute()`.
+- **`js/config.js`** — public deploy config (PostgREST base URL + anon JWT). No secrets.
+- **`js/geo.js`** — `haversineKm`, `offsetKm` (and the equirectangular `cosLat`
+  convention). A **shared kernel**: imported by both the browser app and the
+  Node `precompute/seeds.mjs`, so it must stay environment-neutral.
 - **`js/colors.js`** — the green→purple travel-time scale and legend formatting.
 
-External services are all free, keyless, rate-limited public OSM infrastructure:
-OSRM/FOSSGIS (routing), Overpass (junctions), Nominatim (geocoding), OSM tiles.
-Be gentle with them; bursts get HTTP 429.
+Backend:
+
+- **`db/schema.sql`** — PostGIS, the private `dist` schema (seed, matrix,
+  matrix_version), and the exposed `api` schema.
+- **`db/rpc.sql`** — `api.cells_around`, the single read function.
+- **`db/checks.sql`** — assertion queries (schema/seed/load/RPC sections).
+- **`precompute/`** — `seeds.mjs`, `build-matrix.mjs`, `docker-compose.yml`,
+  `load.sql`, and the runbook.
+
+External services: PostgREST (your endpoint), Nominatim (geocoding), OSM tiles.
+OSRM is used only during the offline precompute (self-hosted, no rate limit).
 
 ## Invariants you must preserve
 
-These cross-module contracts are subtle and easy to break:
-
-- **Index alignment.** `inner[i]` ↔ `cells[i]` ↔ `durations[i]` ↔ `snapMeters[i]`
-  all refer to the same sample point. `inner` (origin + real seeds) is placed
-  *first* in the `points` array; off-map `edge` ring points are appended after,
-  so Voronoi cell indices `0..inner.length-1` map back to `inner`. Don't reorder.
-- **Three-state durations.** In the `durations` array, `undefined` = not routed
-  yet, `null` = genuinely unreachable, a number = seconds. Routing batches run
-  concurrently and finish **out of order**, so coloring checks each cell's own
-  value rather than assuming a contiguous prefix is ready. Preserve this
-  distinction (`=== undefined` vs `=== null`).
-- **Equirectangular Voronoi.** Cells are tessellated in `lng * cos(lat)`, `lat`
-  space so they stay geometrically regular at Czech latitudes, then projected
-  back. Any geometry change must apply and undo the `cosLat` scale consistently.
-- **Coupled speed constants.** `MODE_SPEED_KMH` in `main.js` and `MODES[*].estimateKmh`
-  in `routing.js` are the same per-mode speeds for two different purposes (color
-  domain vs. fallback estimate). Change them together.
+- **Payload-order index alignment.** Voronoi geometry is built from the RPC
+  payload's `cells` array in its own order: `cellPoints[i]` ↔ `cells[i].seconds`.
+  Pair coordinate and duration from the same array element — never zip two
+  independently ordered lists. Synthetic edge-ring points are appended *after*
+  the payload cells and are excluded from coloring (they only bound the outer
+  Voronoi cells, replacing the old `hexGrid` edge ring).
+- **Seconds three-state.** A cell's `seconds` is a number (reachable), `null`
+  (in-radius but unreachable → gray), or the seed is simply absent from `cells`
+  (out-of-radius). Absent never means unreachable. Preserve this distinction
+  end to end (RPC → payload → coloring).
+- **Snapped origin.** The clicked point snaps to the nearest precomputed seed;
+  the marker shows the seed with a "snapped ~N km" note and tooltip distances
+  are measured from the seed, not the click. `snapMeters` is origin-snap
+  confidence (whole-result), not a per-cell road-snap distance.
+- **Snapshot consistency.** At all times the live `dist.seed`, live `dist.matrix`,
+  and the active `dist.matrix_version` row describe the *same* build (same
+  `seed_set_hash`, `profile_version`, `extract_date`). Publish and rollback
+  transition all three atomically in one transaction; readers never see a mix.
+- **Private base tables.** `dist.*` is never added to PostgREST's `db-schemas`;
+  `anon` may only EXECUTE `api.cells_around`. Any new RPC must repeat the U5
+  hardening (search_path, clamps, row cap, grants) — the public endpoint is only
+  as safe as that.
 - **`AbortController` per run.** Each `compute()` aborts the previous one and
-  threads its `signal` through OSRM and Overpass. New async work must accept and
-  honor that signal, and distinguish `AbortError` (user moved on — swallow) from
-  `TimeoutError` (a real failure to fall back from).
+  threads its `signal` through `fetchCells`. New async work must honor it and
+  swallow `AbortError` (user moved on) distinctly from real failures.
+- **Equirectangular Voronoi.** Cells are tessellated in `lng * cos(lat)`, `lat`
+  space (cosLat from the snapped seed) and projected back. Apply and undo the
+  `cosLat` scale consistently.
+- **Coupled speed constants.** `MODE_SPEED_KMH` in `main.js` is the color-domain
+  fallback per mode; the precompute uses OSRM's own profiles. They serve
+  different purposes — don't assume they must match.
 
 ## Key knobs
 
-- **`OSRM_BASE`** (`js/routing.js`) — swap the routing backend. Self-hosted OSRM
-  is a drop-in (identical `table` request shape); a keyed API (ORS/Mapbox) needs
-  `osrmTable()` adapted to its matrix format. This is the lever to escape the
-  shared demo server's 429s.
-- **`MAX_ROUTE_POINTS`** (`js/main.js`, 1200) — caps routed points; when a radius
-  at a given cell size would exceed it, `effectiveSpacingKm()` auto-coarsens the
-  cells (the status line announces this).
-- **`CONCURRENCY` / `MAX_RETRIES` / `BASE_BACKOFF_MS`** (`js/routing.js`) — the
-  rate-limit posture. Raising concurrency against the public server invites 429s.
+- **`POSTGREST_BASE` / the `js/datasource.js` body** (`DATA_SOURCE` seam) — the
+  successor to the old `OSRM_BASE` lever. Swap the backend (PostgREST ↔ custom
+  API ↔ static precomputed JSON) by changing `datasource.js`; the return shape is
+  the fixed contract, the transport is not.
+- **`SEED_SPACING_KM`** (`precompute/seeds.mjs`, default 5) — grid resolution.
+  Storage and precompute cost grow as `modes × seeds²`; on self-hosted Postgres
+  the ceiling is disk, not a tier.
+- **`SRC_BATCH` / `DEST_BATCH`** (`precompute/build-matrix.mjs`) — matrix tile
+  size; `--max-table-size` in `docker-compose.yml` must exceed their sum.
+- **`MAX_RENDER_CELLS`** (`main.js`, 2000) — coarsens the displayed grid at large
+  radii so a national payload stays responsive.
+- **`--max-table-size`** (`docker-compose.yml`) — OSRM matrix request cap.
 
 ## Read first
 
-`README.md` documents the travel-time computation in depth (sampling, snapping,
-rate limits, the estimate fallback, coloring/rescaling). Read it before changing
-anything in the data pipeline — most visual quirks are explained there.
+`docs/plans/2026-06-15-001-feat-precomputed-distance-store-plan.md` is the design
+of record (decisions, requirements, scope, open questions). `precompute/README.md`
+is the operator runbook. `README.md` documents the data path for users.

@@ -22,6 +22,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # The repo root is uploaded verbatim — fail the deploy if a privileged
+      # secret (private key, credentialed connection string, .env/.pgpass) is
+      # tracked. Only the public anon JWT + base URL may ship (R16).
+      - name: Secret guard
+        run: bash scripts/check-no-secrets.sh
       - uses: actions/configure-pages@v5
         with:
           enablement: true

@@ -1,137 +1,93 @@
 # distvis
 
-Travel-time visualization on a Leaflet map using Voronoi cells.
+Travel-time visualization on a Leaflet map using Voronoi cells, for **Czechia**.
 
 Pick an origin (click the map, or search e.g. **Prague**) and the surrounding
-area — up to a 450 km radius, enough to cover the whole Czech Republic — is
-tiled with Voronoi cells, each colored by how long it takes to travel there
-from the origin.
+area — up to a 450 km radius — is tiled with Voronoi cells, each colored by how
+long it takes to travel there from the origin. Travel times are **pre-computed**
+and served from a database, so the map paints in a single fast request instead of
+routing live.
 
 ## How travel times are computed
 
-The map is **not** a true isochrone — it's a sampled approximation. Knowing the
-pipeline explains most visual quirks:
+The map is **not** a true isochrone — it's a sampled approximation served from a
+precomputed store. Knowing the pipeline explains most visual quirks.
 
-### 1. Sampling
+### 1. Pre-computation (offline, one-time)
 
-Each Voronoi cell shows the travel time **to its seed point** — everything
-inside a cell gets that one value. The **Cell size** setting picks the target
-spacing (5–40 km, default 10 km). To stay responsive, the number of routed
-points is capped at ~1200: at large radii the cell size is automatically
-enlarged to fit (the status line says so), so e.g. a 50–200 km radius gets
-true 10 km cells while a 450 km radius coarsens to ~25 km. Two seeding
-strategies (the **Cells** selector):
+A fixed grid of **seed points** (default 5 km spacing) covers Czechia. A
+self-hosted [OSRM](https://project-osrm.org) computes the full seed-to-seed
+travel-time matrix once, per mode (car/bike/foot), over
+[OpenStreetMap](https://www.openstreetmap.org/copyright) road data. The matrix is
+loaded into Postgres/[PostGIS](https://postgis.net) and published as a versioned
+snapshot. There is no live routing at view time, so no rate limits and no point
+cap. See `precompute/README.md` for the operator runbook.
 
-- **Hex grid (default, fast).** A uniform hexagonal grid over the radius
-  (`js/geo.js`). No extra network call, so the map responds immediately on
-  click. Points snapped far from any road are grayed (see Snapping below).
-- **Road junctions.** Real road-network nodes fetched from the
-  [Overpass API](https://overpass-api.de) (`js/nodes.js`): motorway exits
-  (`highway=motorway_junction`) plus significant crossings — nodes shared by
-  3+ motorway/trunk/primary ways — then spatially thinned to one node per
-  cell-size bucket. Cells follow the actual road network and every seed lies
-  *on* a road, so there are no snapping artifacts. The trade-off is the
-  Overpass query (heavy for large radii, several seconds); results are cached
-  per area, and the app falls back to the hex grid if the lookup fails or the
-  area has too few major roads.
+### 2. Retrieval (per click)
 
-### 2. Routing (the real data path)
+When you set an origin, the app calls one read-only PostgREST function that:
 
-Travel times come from the public [FOSSGIS OSRM](https://routing.openstreetmap.de)
-`table` service (`js/routing.js`), in batches of ≤99 points run up to 4 at a
-time so routing isn't a long serial wait:
+- **Snaps** your clicked point to the nearest seed (a PostGIS nearest-neighbour
+  lookup). The map marker moves to that seed and notes how far it snapped — so
+  the times you see are measured from the seed, up to ~half the grid spacing
+  away from your exact click.
+- **Filters** to the destination seeds within your chosen radius and returns
+  their precomputed travel times in one response.
 
-```
-GET /routed-car/table/v1/driving/{origin};{p1};…;{p99}?sources=0&annotations=duration
-```
+Each Voronoi cell shows the travel time **to its seed point** — everything inside
+a cell gets that one value.
 
-OSRM returns the duration in seconds of the **fastest road route** from the
-origin to each point, using OpenStreetMap road data and typical speed limits.
-Important properties of this data:
+Important properties of the data:
 
-- **Snapping.** OSRM first snaps every sample point to the nearest routable
-  road. With road-junction seeding this is a no-op (the seeds are already on
-  roads), but in hex-grid mode a point that lands in a forest or lake gets
-  evaluated from a road possibly kilometers away. Cells whose point had to be
-  moved more than ~0.6 × the cell spacing (min 1.5 km) are rendered gray as
-  unreliable, with the snap distance shown in the tooltip.
-- **No traffic.** Times are free-flow estimates from speed profiles, not live
-  or historical traffic.
-- **`null` = unreachable** (no road connection found) — rendered gray.
-- The bike/foot modes use the corresponding OSRM profiles (`routed-bike`,
-  `routed-foot`).
+- **No traffic.** Times are free-flow estimates from OSRM speed profiles, not
+  live or historical traffic.
+- **Unreachable** seeds (no road connection) render gray.
+- **Snapshot, not live.** The data reflects a dated OSM extract; the status line
+  shows "road data as of …" so you know its age.
 
-### 3. Rate limits & fallback
+### 3. Coverage
 
-`routing.openstreetmap.de` is a **free shared demo server** run by FOSSGIS, with
-no API key and strict rate limiting — bursts of `table` requests return
-`429 Too Many Requests`. To stay within it the app keeps concurrency low (2),
-caches results per view, and **retries 429/5xx batches with exponential backoff**
-(honoring any `Retry-After` header) before giving up — so a transient burst
-recovers real data instead of dropping straight to estimates.
-
-If a batch still fails after retries (offline, persistent rate limit, CORS),
-the app degrades to a crow-flies estimate:
-
-```
-time = haversine_distance × 1.3 (detour factor) / speed   (car 75, bike 16, foot 4.5 km/h)
-```
-
-This produces smooth concentric rings that ignore roads entirely. **The status
-line under the controls tells you which source you're looking at** — if it says
-"routing API unreachable — showing straight-line estimates", the colors are
-geometry, not reality.
+Coverage is **Czechia only**. Clicking outside the country (or far from any seed)
+shows an explicit "outside coverage" message rather than a misleading map. A
+radius smaller than the grid resolution asks you to zoom out / increase the
+radius. If the data service is unreachable, the app says so and you can retry —
+there is no straight-line estimate fallback.
 
 ### 4. Coloring
 
 Colors run linearly from 0 minutes (green) through yellow/orange/red to purple.
-While batches stream in, a conservative provisional maximum derived from the
-radius and mode (`radius × 1.3 / mode speed`) anchors the scale; once routing
-completes, the scale is **rescaled to the 98th percentile of the actual data**
-(rounded to a nice value) and all cells are repainted, so the full palette is
-always used and the legend reflects real times. Hover any cell for the exact
-minutes — the tooltip is always the ground truth.
+The scale is set to the 98th percentile of the actual data (rounded to a nice
+value) so the full palette is used and the legend reflects real times. Hover any
+cell for the exact minutes.
 
 ## Controls
 
-- **Search / map click** — set the origin point.
-- **Mode** — car, bike, or foot routing profile.
-- **Cells** — Voronoi seeds: uniform hex grid (default, fast) or road junctions.
-- **Radius** — how far out to sample (50–450 km).
-- **Cell size** — target spacing of the cells (5–40 km; auto-enlarged at large radii).
+- **Search / map click** — set the origin point (snapped to the nearest seed).
+- **Mode** — car, bike, or foot (only modes present in the dataset are enabled).
+- **Radius** — how far out to show cells (50–450 km).
 - **Opacity** — overlay transparency.
 
 ## Running
 
-Pushes to `main` deploy automatically to GitHub Pages via
-`.github/workflows/deploy-pages.yml`.
-
-For local development — plain static files, no build step — ES modules just
-need an HTTP server:
+The frontend is plain static files (no build step). Point it at your data
+service by setting `POSTGREST_BASE` (and `ANON_JWT` if required) in
+`js/config.js`, then serve over HTTP:
 
 ```sh
 python3 -m http.server 8000
 # or: npx serve
 ```
 
-then open <http://localhost:8000>.
+then open <http://localhost:8000>. Pushes to `main` deploy automatically to
+GitHub Pages.
 
-Leaflet and d3-delaunay are loaded from CDNs; routing and geocoding use free
-public OSM services (please be gentle with them).
+Leaflet and d3-delaunay load from CDNs; geocoding uses
+[Nominatim](https://nominatim.org). Travel-time data comes from your
+Postgres/PostGIS + PostgREST backend.
 
-## Avoiding routing rate limits
+## Building the data
 
-The `429 Too Many Requests` errors come from the shared FOSSGIS demo server,
-which isn't meant for bulk use. The in-app mitigations (low concurrency, backoff
-retries, result caching) reduce them but can't raise a limit on a server you
-don't control. To eliminate them, point `OSRM_BASE` in `js/routing.js` at a
-backend with real quota:
-
-- **Self-host OSRM** — run the [OSRM backend](https://github.com/Project-OSRM/osrm-backend)
-  in Docker against an OSM extract (e.g. from [Geofabrik](https://download.geofabrik.de)).
-  No shared limits; the `table` request shape is identical, so only the base URL changes.
-- **A keyed routing API** — e.g. [OpenRouteService](https://openrouteservice.org)
-  (free tier with an API key) or Mapbox. These need their own matrix-endpoint
-  request format and an API key, so the `osrmTable()` call would need adapting.
-
-Self-hosting is the closest drop-in. Happy to wire either up on request.
+Standing up the backend (self-hosted Postgres + PostGIS + PostgREST) and building
+the matrix (self-hosted OSRM precompute → COPY → atomic swap) is described
+end-to-end in [`precompute/README.md`](precompute/README.md). The design of
+record is `docs/plans/2026-06-15-001-feat-precomputed-distance-store-plan.md`.
