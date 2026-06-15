@@ -5,8 +5,8 @@ This file provides guidance to coding agents when working with code in this repo
 ## What this is
 
 A travel-time map for **Czechia**: pick an origin and the surrounding area (up to
-a 450 km radius) is tiled with Voronoi cells colored by driving/biking/walking
-time from that point. Travel times are **pre-computed** (not fetched live) and
+a 450 km radius) is tiled with Voronoi cells colored by **car driving** time
+from that point. Travel times are **pre-computed** (not fetched live) and
 served from Postgres/PostGIS via a PostgREST read endpoint.
 
 The **frontend** is still a pure static site — no build step, no bundler, ES
@@ -41,13 +41,13 @@ Two data paths. Only the online one runs in the deployed site.
 
 ```
 OFFLINE (one-time / on refresh, precompute/ + db/):
-  CZ extract + seed grid → self-hosted OSRM (per profile) → matrix.csv
+  CZ extract + seed grid → self-hosted OSRM (car profile) → matrix.csv
     → COPY into Postgres staging → validate → atomic swap (versioned snapshot)
 
 ONLINE (per origin, the deployed app):
   click → datasource.fetchCells → PostgREST api.cells_around
     → snap origin to nearest seed (PostGIS KNN) + radius filter
-    → {seed, snapMeters, cells, modes, version} → Voronoi → color
+    → {seed, snapMeters, cells, version} → Voronoi → color
 ```
 
 Frontend modules (browser ES modules, no framework):
@@ -55,7 +55,7 @@ Frontend modules (browser ES modules, no framework):
 - **`js/main.js`** — orchestration, Leaflet map, UI wiring, the `compute()`
   pipeline (fetch payload → build Voronoi → color), result cache, legend, tooltips.
 - **`js/datasource.js`** — the ONLY transport-aware module: calls the PostgREST
-  RPC and returns the frontend's own `{ seed, snapMeters, cells, modes, version }`
+  RPC and returns the frontend's own `{ seed, snapMeters, cells, version }`
   shape. The backend can be swapped here without touching `compute()`.
 - **`js/config.js`** — public deploy config (PostgREST base URL + anon JWT). No secrets.
 - **`js/geo.js`** — `haversineKm`, `offsetKm`, and the `KM_PER_DEG_LAT` /
@@ -107,9 +107,9 @@ OSRM is used only during the offline precompute (self-hosted, no rate limit).
 - **Equirectangular Voronoi.** Cells are tessellated in `lng * cos(lat)`, `lat`
   space (cosLat from the snapped seed) and projected back. Apply and undo the
   `cosLat` scale consistently.
-- **Coupled speed constants.** `MODE_SPEED_KMH` in `main.js` is the color-domain
-  fallback per mode; the precompute uses OSRM's own profiles. They serve
-  different purposes — don't assume they must match.
+- **Color-domain fallback.** `FALLBACK_KMH` in `main.js` (car free-flow speed)
+  only anchors the color scale when nothing in the payload is reachable; real
+  times come from the precomputed matrix (built with OSRM's car profile).
 
 ## Key knobs
 
@@ -118,8 +118,8 @@ OSRM is used only during the offline precompute (self-hosted, no rate limit).
   API ↔ static precomputed JSON) by changing `datasource.js`; the return shape is
   the fixed contract, the transport is not.
 - **`SEED_SPACING_KM`** (`precompute/seeds.mjs`, default 5) — grid resolution.
-  Storage and precompute cost grow as `modes × seeds²`; on self-hosted Postgres
-  the ceiling is disk, not a tier.
+  Storage and precompute cost grow as `seeds²` (car only); on self-hosted
+  Postgres the ceiling is disk, not a tier.
 - **`SRC_BATCH` / `DEST_BATCH`** (`precompute/build-matrix.mjs`) — matrix tile
   size; `--max-table-size` in `docker-compose.yml` must exceed their sum.
 - **`MAX_RENDER_CELLS`** (`main.js`, 2000) — coarsens the displayed grid at large

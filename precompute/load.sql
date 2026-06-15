@@ -37,13 +37,12 @@ create index seed_stage_geom_gix on dist.seed_stage using gist (geom);
 -- 2. Stage matrix: unindexed COPY (a blank seconds field becomes NULL =
 --    unreachable, retained per KTD5), then build the access-path PK + cluster.
 create table dist.matrix_stage (
-  mode smallint not null, origin_seed_id integer not null,
-  dest_seed_id integer not null, seconds integer
+  origin_seed_id integer not null, dest_seed_id integer not null, seconds integer
 );
 alter table dist.matrix_stage enable row level security;  -- preserved through the swap
-\copy dist.matrix_stage(mode,origin_seed_id,dest_seed_id,seconds) from 'matrix.csv' with (format csv)
+\copy dist.matrix_stage(origin_seed_id,dest_seed_id,seconds) from 'matrix.csv' with (format csv)
 set maintenance_work_mem = '1GB';  -- keep the PK build + CLUSTER in memory at tens of millions of rows
-alter table dist.matrix_stage add primary key (mode, origin_seed_id, dest_seed_id);
+alter table dist.matrix_stage add primary key (origin_seed_id, dest_seed_id);
 cluster dist.matrix_stage using matrix_stage_pkey;
 analyze dist.seed_stage;
 analyze dist.matrix_stage;
@@ -53,7 +52,6 @@ analyze dist.matrix_stage;
 do $$
 declare
   n         bigint := (select count(*) from dist.seed_stage);
-  n_modes   int    := (select count(distinct mode) from dist.matrix_stage);
   bad_ref   bigint;
   bad_diag  bigint;
   bad_card  bigint;
@@ -75,21 +73,16 @@ begin
    where origin_seed_id = dest_seed_id and seconds is distinct from 0;
   assert bad_diag = 0, format('%s diagonal entries are not zero', bad_diag);
 
-  -- Cardinality: full N x N per mode, nulls retained (KTD5).
-  bad_card := (select count(*) from dist.matrix_stage) - (n_modes::bigint * n * n);
-  assert bad_card = 0, format('row count off by %s vs modes*N^2 (modes=%s N=%s)', bad_card, n_modes, n);
-
-  -- Per-mode coverage: each present mode has exactly N x N rows.
-  assert not exists (
-    select 1 from dist.matrix_stage group by mode having count(*) <> n * n
-  ), 'a mode does not have exactly N*N rows';
+  -- Cardinality: full N x N, nulls retained (KTD5).
+  bad_card := (select count(*) from dist.matrix_stage) - (n * n);
+  assert bad_card = 0, format('row count off by %s vs N^2 (N=%s)', bad_card, n);
 
   -- Value sanity: no negatives; nothing implausibly large for the country.
   select count(*) into bad_val from dist.matrix_stage
    where seconds is not null and (seconds < 0 or seconds > 25200);  -- 7 h cap
   assert bad_val = 0, format('%s seconds values out of range [0, 25200]', bad_val);
 
-  raise notice 'U4 validation gate passed (N=% seeds, % modes)', n, n_modes;
+  raise notice 'U4 validation gate passed (N=% seeds)', n;
 end
 $$;
 
@@ -100,15 +93,14 @@ $$;
 begin;
   -- New snapshot row (active=false), capturing its id and the outgoing active id.
   insert into dist.matrix_version
-    (extract_date, profile_version, seed_spacing_km, seed_set_hash, modes,
+    (extract_date, profile_version, seed_spacing_km, seed_set_hash,
      expected_row_count, actual_row_count, previous_version_id, active)
   select
     :'extract_date'::date,
     :'profile_version',
     :'seed_spacing_km'::numeric,
     :'seed_set_hash',
-    (select array_agg(distinct mode order by mode) from dist.matrix_stage),
-    (select count(distinct mode) from dist.matrix_stage) * (select count(*) from dist.seed_stage)::bigint * (select count(*) from dist.seed_stage)::bigint,
+    (select count(*) from dist.seed_stage)::bigint * (select count(*) from dist.seed_stage)::bigint,
     (select count(*) from dist.matrix_stage),
     (select id from dist.matrix_version where active),
     false

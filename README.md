@@ -17,7 +17,7 @@ precomputed store. Knowing the pipeline explains most visual quirks.
 
 A fixed grid of **seed points** (default 5 km spacing) covers Czechia. A
 self-hosted [OSRM](https://project-osrm.org) computes the full seed-to-seed
-travel-time matrix once, per mode (car/bike/foot), over
+**car-driving** travel-time matrix once over
 [OpenStreetMap](https://www.openstreetmap.org/copyright) road data. The matrix is
 loaded into Postgres/[PostGIS](https://postgis.net) and published as a versioned
 snapshot. There is no live routing at view time, so no rate limits and no point
@@ -63,7 +63,6 @@ cell for the exact minutes.
 ## Controls
 
 - **Search / map click** — set the origin point (snapped to the nearest seed).
-- **Mode** — car, bike, or foot (only modes present in the dataset are enabled).
 - **Radius** — how far out to show cells (50–450 km).
 - **Opacity** — overlay transparency.
 

@@ -161,12 +161,12 @@ declare bad bigint;
 begin
   create temp table _seed_fi (id integer primary key) on commit drop;
   insert into _seed_fi values (1), (2);
-  create temp table _matrix_fi (mode smallint, origin_seed_id int, dest_seed_id int, seconds int) on commit drop;
+  create temp table _matrix_fi (origin_seed_id int, dest_seed_id int, seconds int) on commit drop;
   insert into _matrix_fi values
-    (0, 1, 1, 5),    -- non-zero diagonal (should be 0)
-    (0, 1, 2, 100),
-    (0, 2, 1, -3),   -- negative duration
-    (0, 2, 3, 50);   -- dangling dest id (3 not in _seed_fi)
+    (1, 1, 5),    -- non-zero diagonal (should be 0)
+    (1, 2, 100),
+    (2, 1, -3),   -- negative duration
+    (2, 3, 50);   -- dangling dest id (3 not in _seed_fi)
 
   select count(*) into bad from (
     select origin_seed_id as id from _matrix_fi union select dest_seed_id from _matrix_fi
@@ -188,7 +188,7 @@ $$;
 -- ===========================================================================
 do $$
 declare
-  sig text := 'api.cells_around(double precision,double precision,smallint,double precision)';
+  sig text := 'api.cells_around(double precision,double precision,double precision)';
   doc jsonb;
 begin
   -- Privilege: anon may execute, public may not.
@@ -197,39 +197,35 @@ begin
   assert not has_function_privilege('public', sig, 'EXECUTE'),
     'public must not be able to EXECUTE api.cells_around';
 
-  -- Happy path: central Prague, car, 50 km.
-  doc := api.cells_around(14.42, 50.08, 0::smallint, 50000);
+  -- Happy path: central Prague, 50 km.
+  doc := api.cells_around(14.42, 50.08, 50000);
   assert doc->>'status' = 'ok', format('expected ok, got %s', doc->>'status');
   assert jsonb_array_length(doc->'cells') >= 3, 'happy-path returned too few cells';
   assert (doc->>'snapMeters') is not null, 'snapMeters missing';
   assert (doc#>>'{version,extractDate}') is not null, 'version.extractDate missing';
 
   -- Out of coverage: Vienna (lat < 48.5) -> typed state, no exception.
-  assert api.cells_around(16.37, 48.21, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+  assert api.cells_around(16.37, 48.21, 50000)->>'status' = 'out_of_coverage',
     'Vienna should be out_of_coverage';
 
   -- Input hardening: NaN / null coerce to out_of_coverage, not an error.
-  assert api.cells_around('NaN'::double precision, 50.0, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+  assert api.cells_around('NaN'::double precision, 50.0, 50000)->>'status' = 'out_of_coverage',
     'NaN lng should be out_of_coverage';
-  assert api.cells_around('infinity'::double precision, 50.0, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+  assert api.cells_around('infinity'::double precision, 50.0, 50000)->>'status' = 'out_of_coverage',
     'Infinity lng should be out_of_coverage';
-  assert api.cells_around(null, null, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+  assert api.cells_around(null, null, 50000)->>'status' = 'out_of_coverage',
     'null coords should be out_of_coverage';
-  assert api.cells_around(14.42, 50.08, 0::smallint, null)->>'status' = 'radius_too_small',
+  assert api.cells_around(14.42, 50.08, null)->>'status' = 'radius_too_small',
     'null radius should clamp to 0 -> radius_too_small';
 
-  -- Mode whitelist: a mode absent from the snapshot.
-  assert api.cells_around(14.42, 50.08, 9::smallint, 50000)->>'status' = 'mode_unavailable',
-    'unknown mode should be mode_unavailable';
-
   -- Radius too small: 0 m radius yields < MIN_CELLS.
-  assert api.cells_around(14.42, 50.08, 0::smallint, 0)->>'status' = 'radius_too_small',
+  assert api.cells_around(14.42, 50.08, 0)->>'status' = 'radius_too_small',
     'zero radius should be radius_too_small';
 
   -- Radius clamp: an absurd radius must not error and must stay capped.
-  assert api.cells_around(14.42, 50.08, 0::smallint, 9e12)->>'status' = 'ok',
+  assert api.cells_around(14.42, 50.08, 9e12)->>'status' = 'ok',
     'oversized radius should clamp, not error';
-  assert jsonb_array_length(api.cells_around(14.42, 50.08, 0::smallint, 9e12)->'cells') <= 5000,
+  assert jsonb_array_length(api.cells_around(14.42, 50.08, 9e12)->'cells') <= 5000,
     'cell cap (5000) not enforced';
 
   raise notice 'U5 RPC checks passed';

@@ -3,7 +3,9 @@ import { offsetKm, haversineKm } from "./geo.js";
 import { fetchCells } from "./datasource.js";
 import { colorFor, cssGradient, niceMaxMinutes, formatMinutes, UNREACHABLE_COLOR } from "./colors.js";
 
-const MODE_SPEED_KMH = { car: 75, bike: 16, foot: 4.5 };
+// Car free-flow speed — only used as the color-domain fallback when nothing in
+// the payload is reachable (the real times come from the precomputed matrix).
+const FALLBACK_KMH = 75;
 
 // Cap on rendered cells: a 450 km / 5 km payload is thousands of polygons, so
 // the displayed grid is coarsened (uniformly sub-sampled) past this to keep
@@ -55,7 +57,6 @@ const ui = {
   minimizeBtn: document.getElementById("minimize-btn"),
   badge: document.getElementById("panel-badge"),
   badgeLabel: document.getElementById("badge-label"),
-  mode: document.getElementById("mode"),
   radius: document.getElementById("radius"),
   opacity: document.getElementById("opacity"),
   status: document.getElementById("status"),
@@ -165,15 +166,13 @@ function startCompute() {
   });
 }
 
-// Debounce rapid setting changes so flipping through options fires one request.
+// Debounce rapid radius changes so flipping through options fires one request.
 let settingsTimer;
-for (const el of [ui.mode, ui.radius]) {
-  el.addEventListener("change", () => {
-    if (!origin) return;
-    clearTimeout(settingsTimer);
-    settingsTimer = setTimeout(startCompute, 300);
-  });
-}
+ui.radius.addEventListener("change", () => {
+  if (!origin) return;
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(startCompute, 300);
+});
 
 window.addEventListener("unhandledrejection", (e) => {
   if (e.reason?.name === "AbortError") return;
@@ -196,24 +195,20 @@ async function compute() {
   abortController = controller;
   const { signal } = controller;
 
-  const mode = ui.mode.value;
   const radiusKm = Number(ui.radius.value);
 
   // Identical re-runs reuse the cached payload (no RPC). Coarse origin key
   // (~100 m) collapses near-identical re-clicks; version change clears the cache.
-  const key = `${mode}|${radiusKm}|${origin.lat.toFixed(3)},${origin.lng.toFixed(3)}`;
+  const key = `${radiusKm}|${origin.lat.toFixed(3)},${origin.lng.toFixed(3)}`;
   const cached = cacheGet(key);
   if (cached) {
-    renderPayload(cached, mode, radiusKm);
+    renderPayload(cached, radiusKm);
     return;
   }
 
   setStatus("Loading travel times…", "working");
-  const payload = await fetchCells(origin, mode, radiusKm, { signal });
+  const payload = await fetchCells(origin, radiusKm, { signal });
   if (signal.aborted) return;
-
-  // Reflect which modes the active snapshot actually has (R12).
-  if (payload.modes?.length) reflectModes(payload.modes);
 
   switch (payload.status) {
     case "ok":
@@ -223,22 +218,8 @@ async function compute() {
         currentVersionId = payload.version?.id ?? null;
       }
       cacheSet(key, payload);
-      renderPayload(payload, mode, radiusKm);
+      renderPayload(payload, radiusKm);
       return;
-    case "mode_unavailable": {
-      // The selected mode isn't in the snapshot. If another mode is available,
-      // switch to it and re-run rather than leaving the user stuck (disabling
-      // the <option> alone does not change ui.mode.value).
-      const fallback = payload.modes?.find((m) => m !== mode);
-      if (fallback) {
-        ui.mode.value = fallback;
-        startCompute();
-        return;
-      }
-      clearCells();
-      setStatus(`“${mode}” isn’t available in this dataset, and no other mode is either.`, "error");
-      return;
-    }
     case "out_of_coverage": {
       clearCells();
       const near = payload.snapMeters ? ` (nearest data ~${Math.round(payload.snapMeters / 1000)} km away)` : "";
@@ -266,10 +247,6 @@ function clearCells() {
   ui.legend.hidden = true;
 }
 
-function reflectModes(modes) {
-  for (const opt of ui.mode.options) opt.disabled = !modes.includes(opt.value);
-}
-
 /** Build a ring of off-map points one grid step beyond the returned cells so the
  *  outermost Voronoi cells stay bounded (replaces hexGrid's edge ring). */
 function edgeRing(seed, cellPoints, spacingKm) {
@@ -287,7 +264,7 @@ function edgeRing(seed, cellPoints, spacingKm) {
   return ring;
 }
 
-function renderPayload(payload, mode, radiusKm) {
+function renderPayload(payload, radiusKm) {
   const seed = payload.seed;
   const spacingKm = payload.version?.seedSpacingKm ?? 5;
 
@@ -313,9 +290,9 @@ function renderPayload(payload, mode, radiusKm) {
   const minutes = cells.map((c) => (c.seconds == null ? null : c.seconds / 60));
   const points = [...cellPoints, ...edgeRing(seed, cellPoints, spacingKm)];
 
-  // Color domain from the actual data (98th percentile), with a radius/mode
+  // Color domain from the actual data (98th percentile), with a radius-based
   // fallback when nothing is reachable.
-  const domainMax = dataDomainMax(minutes) || niceMaxMinutes(((radiusKm * 1.3) / MODE_SPEED_KMH[mode]) * 60);
+  const domainMax = dataDomainMax(minutes) || niceMaxMinutes(((radiusKm * 1.3) / FALLBACK_KMH) * 60);
 
   // Voronoi in locally-corrected equirectangular space (cosLat from the seed).
   const cosLat = Math.cos((seed.lat * Math.PI) / 180);
@@ -353,7 +330,7 @@ function renderPayload(payload, mode, radiusKm) {
   renderLegend(domainMax);
   const extractDate = payload.version?.extractDate;
   setStatus(
-    `${total} cells from “${origin.label}” by ${mode}${coarsenedNote}` +
+    `${total} cells from “${origin.label}” by car${coarsenedNote}` +
       `${extractDate ? ` · road data as of ${extractDate}` : ""}.`
   );
 }

@@ -6,8 +6,8 @@ run on a machine with Docker + Node 18+, and the outputs (`seeds.csv`,
 `matrix.csv`, `*.osrm*`, the extract) are gitignored.
 
 Pipeline: **seeds → OSRM extract/contract → build matrix → load + atomic swap**.
-Launch target: 5 km spacing, all three modes (car/bike/foot) — ~3,600 seeds (CZ
-polygon) and ~13M ordered pairs/mode.
+Launch target: 5 km spacing, **car only** — ~3,600 seeds (CZ polygon) and ~13M
+ordered pairs.
 
 ## 0. Prerequisites
 
@@ -28,37 +28,34 @@ Writes `seeds.csv` (`id,lng,lat`) and `seeds.meta.json` (carries `seedSetHash`,
 `count`, `spacingKm` — consumed by the load step). Re-running with the same
 inputs is deterministic: `seedSetHash` is stable.
 
-## 2. Build OSRM graphs — once per profile
+## 2. Build the OSRM graph (car)
 
 Download the extract (pin the dated file for a reproducible snapshot; note its
 `osmosis_replication_timestamp` for `extract_date`):
 
 ```sh
-mkdir -p osrm-data/car osrm-data/bike osrm-data/foot
+mkdir -p osrm-data/car
 curl -L -o czech-republic-latest.osm.pbf \
   https://download.geofabrik.de/europe/czech-republic-latest.osm.pbf
+cp czech-republic-latest.osm.pbf osrm-data/car/
 ```
 
-For each profile, extract + contract (CH — the documented fit for one-shot large
-matrices) into its own subdir so the `.osrm` files don't clobber each other:
+Extract + contract the car profile (CH — the documented fit for one-shot large
+matrices):
 
 ```sh
-for p in car bike foot; do
-  case $p in car) lua=car;; bike) lua=bicycle;; foot) lua=foot;; esac
-  cp czech-republic-latest.osm.pbf osrm-data/$p/
-  docker run --rm -t -v "$PWD/osrm-data/$p:/data" ghcr.io/project-osrm/osrm-backend \
-    osrm-extract -p /opt/$lua.lua /data/czech-republic-latest.osm.pbf
-  docker run --rm -t -v "$PWD/osrm-data/$p:/data" ghcr.io/project-osrm/osrm-backend \
-    osrm-contract /data/czech-republic-latest.osrm
-done
+docker run --rm -t -v "$PWD/osrm-data/car:/data" ghcr.io/project-osrm/osrm-backend \
+  osrm-extract -p /opt/car.lua /data/czech-republic-latest.osm.pbf
+docker run --rm -t -v "$PWD/osrm-data/car:/data" ghcr.io/project-osrm/osrm-backend \
+  osrm-contract /data/czech-republic-latest.osrm
 ```
 
 ## 3. Build the matrix (U3)
 
-Start the three routed servers and stream the matrix:
+Start the car routed server and stream the matrix:
 
 ```sh
-docker compose up -d          # car:5000 bike:5001 foot:5002
+docker compose up -d          # car:5000
 node build-matrix.mjs         # -> matrix.csv (+ matrix.meta.json)
 docker compose down
 ```

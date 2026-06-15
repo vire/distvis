@@ -146,6 +146,7 @@ vite.config.ts.timestamp-*
 precompute/seeds.csv
 precompute/seeds.meta.json
 precompute/matrix.csv
+precompute/matrix.meta.json
 precompute/*.osm.pbf
 precompute/*.osrm*
 precompute/osrm-data/

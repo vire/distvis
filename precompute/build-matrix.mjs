@@ -1,10 +1,10 @@
 // precompute/build-matrix.mjs
 // Build the full seed-to-seed duration matrix from a SELF-HOSTED OSRM (U3).
 //
-// Reads precompute/seeds.csv (id,lng,lat in file order) and, for each mode,
-// queries the local osrm-routed `table` service, streaming results to
-// precompute/matrix.csv as `mode,origin_id,dest_id,seconds` (seconds blank =
-// unreachable, retained per KTD5; COPY reads a blank field as NULL).
+// Reads precompute/seeds.csv (id,lng,lat in file order) and queries the local
+// car osrm-routed `table` service, streaming results to precompute/matrix.csv
+// as `origin_id,dest_id,seconds` (seconds blank = unreachable, retained per
+// KTD5; COPY reads a blank field as NULL).
 //
 // Batching: the matrix is TILED — both sources and destinations are chunked, so
 // each request's coordinate list is at most SRC_BATCH+DEST_BATCH points. This
@@ -12,7 +12,7 @@
 // thousands of seeds (a refinement of the plan's batching sketch). Consequently
 // osrm-routed only needs `--max-table-size >= SRC_BATCH+DEST_BATCH`.
 //
-// Prereq: the three osrm-routed servers are up (see docker-compose.yml /
+// Prereq: the car osrm-routed server is up (see docker-compose.yml /
 // README). Run:  node build-matrix.mjs
 
 import { readFileSync, createWriteStream, writeFileSync } from "node:fs";
@@ -22,12 +22,8 @@ import { once } from "node:events";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Per-mode OSRM endpoints (one single-profile osrm-routed per port).
-const MODES = [
-  { key: "car", mode: 0, base: process.env.OSRM_CAR ?? "http://localhost:5000" },
-  { key: "bike", mode: 1, base: process.env.OSRM_BIKE ?? "http://localhost:5001" },
-  { key: "foot", mode: 2, base: process.env.OSRM_FOOT ?? "http://localhost:5002" },
-];
+// Single car OSRM endpoint (one single-profile osrm-routed).
+const OSRM_BASE = process.env.OSRM_CAR ?? "http://localhost:5000";
 const SRC_BATCH = Number(process.env.SRC_BATCH ?? 200);
 const DEST_BATCH = Number(process.env.DEST_BATCH ?? 200);
 const REQUEST_TIMEOUT_MS = 120000;
@@ -41,7 +37,7 @@ const seeds = lines.slice(1).map((l) => {
   return { id: Number(id), lng: Number(lng), lat: Number(lat) };
 });
 const N = seeds.length;
-console.log(`[matrix] ${N} seeds, tiles ${SRC_BATCH}x${DEST_BATCH}, modes: ${MODES.map((m) => m.key).join(",")}`);
+console.log(`[matrix] ${N} seeds, tiles ${SRC_BATCH}x${DEST_BATCH}, car only`);
 
 // --- Backpressure-aware CSV sink --------------------------------------------
 const out = createWriteStream(join(HERE, "matrix.csv"));
@@ -90,35 +86,31 @@ async function withRetry(fn) {
 // --- Tile the matrix ---------------------------------------------------------
 let rows = 0;
 let nulls = 0;
-const nullsByMode = {};
-for (const { key, mode, base } of MODES) {
-  nullsByMode[key] = 0;
-  for (let s = 0; s < N; s += SRC_BATCH) {
-    const srcSeeds = seeds.slice(s, s + SRC_BATCH);
-    for (let d = 0; d < N; d += DEST_BATCH) {
-      const destSeeds = seeds.slice(d, d + DEST_BATCH);
-      const durations = await withRetry((sig) => osrmTableTile(base, srcSeeds, destSeeds, sig));
-      for (let i = 0; i < srcSeeds.length; i++) {
-        const row = durations[i];
-        let chunk = "";
-        for (let j = 0; j < destSeeds.length; j++) {
-          const v = row[j];
-          // Force an exact 0 on the diagonal: OSRM's self-distance can round to a
-          // small non-zero, which would trip load.sql's zero-diagonal gate.
-          let seconds;
-          if (srcSeeds[i].id === destSeeds[j].id) seconds = "0";
-          else if (v == null) { nulls++; nullsByMode[key]++; seconds = ""; }
-          else seconds = String(Math.round(v));
-          chunk += `${mode},${srcSeeds[i].id},${destSeeds[j].id},${seconds}\n`;
-        }
-        await emit(chunk);
-        rows += destSeeds.length;
+for (let s = 0; s < N; s += SRC_BATCH) {
+  const srcSeeds = seeds.slice(s, s + SRC_BATCH);
+  for (let d = 0; d < N; d += DEST_BATCH) {
+    const destSeeds = seeds.slice(d, d + DEST_BATCH);
+    const durations = await withRetry((sig) => osrmTableTile(OSRM_BASE, srcSeeds, destSeeds, sig));
+    for (let i = 0; i < srcSeeds.length; i++) {
+      const row = durations[i];
+      let chunk = "";
+      for (let j = 0; j < destSeeds.length; j++) {
+        const v = row[j];
+        // Force an exact 0 on the diagonal: OSRM's self-distance can round to a
+        // small non-zero, which would trip load.sql's zero-diagonal gate.
+        let seconds;
+        if (srcSeeds[i].id === destSeeds[j].id) seconds = "0";
+        else if (v == null) { nulls++; seconds = ""; }
+        else seconds = String(Math.round(v));
+        chunk += `${srcSeeds[i].id},${destSeeds[j].id},${seconds}\n`;
       }
+      await emit(chunk);
+      rows += destSeeds.length;
     }
-    process.stdout.write(`\r[matrix] ${key}: sources ${Math.min(s + SRC_BATCH, N)}/${N}   `);
   }
-  console.log();
+  process.stdout.write(`\r[matrix] sources ${Math.min(s + SRC_BATCH, N)}/${N}   `);
 }
+console.log();
 
 out.end();
 await once(out, "finish");
@@ -126,6 +118,6 @@ await once(out, "finish");
 // Record what was produced for the load step's cardinality gate (U4).
 writeFileSync(
   join(HERE, "matrix.meta.json"),
-  JSON.stringify({ seeds: N, modes: MODES.map((m) => m.mode), rows, nulls, nullsByMode, expectedRows: MODES.length * N * N }, null, 2) + "\n"
+  JSON.stringify({ seeds: N, rows, nulls, expectedRows: N * N }, null, 2) + "\n"
 );
-console.log(`[matrix] done: ${rows} rows (${nulls} null/unreachable) -> matrix.csv  expected ${MODES.length * N * N}`);
+console.log(`[matrix] done: ${rows} rows (${nulls} null/unreachable) -> matrix.csv  expected ${N * N}`);

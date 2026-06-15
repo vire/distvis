@@ -30,7 +30,6 @@ create table if not exists dist.matrix_version (
   profile_version     text        not null,   -- OSRM version / profile build id
   seed_spacing_km     numeric     not null,   -- launch target: 5 (KTD10)
   seed_set_hash       text        not null,   -- hash of sorted (id, rounded geom) set (U2)
-  modes               smallint[]  not null,   -- {0,1,2} = car,bike,foot
   expected_row_count  bigint,
   actual_row_count    bigint,
   previous_version_id integer references dist.matrix_version(id),
@@ -50,16 +49,15 @@ create table if not exists dist.seed (
 );
 create index if not exists seed_geom_gix on dist.seed using gist (geom);
 
--- All-pairs duration matrix. The PK IS the access path for "all destinations
--- from one origin for one mode" (KTD4). `seconds` is nullable:
+-- All-pairs car-driving duration matrix. The PK IS the access path for "all
+-- destinations from one origin" (KTD4). `seconds` is nullable:
 --   null   = unreachable (retained row, KTD5)
 --   absent = out-of-radius (never means unreachable)
 create table if not exists dist.matrix (
-  mode           smallint not null,   -- 0=car, 1=bike, 2=foot
-  origin_seed_id integer  not null,
-  dest_seed_id   integer  not null,
+  origin_seed_id integer not null,
+  dest_seed_id   integer not null,
   seconds        integer,
-  primary key (mode, origin_seed_id, dest_seed_id)
+  primary key (origin_seed_id, dest_seed_id)
 );
 
 -- Ensure the PostgREST anon role exists (no-op if it already does).
