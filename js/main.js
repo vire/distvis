@@ -1,47 +1,31 @@
 import { Delaunay } from "https://cdn.jsdelivr.net/npm/d3-delaunay@6/+esm";
-import { hexGrid, haversineKm } from "./geo.js";
-import { fetchRoadNodes, thinNodes } from "./nodes.js";
-import { travelTimes } from "./routing.js";
+import { offsetKm, haversineKm } from "./geo.js";
+import { fetchCells } from "./datasource.js";
 import { colorFor, cssGradient, niceMaxMinutes, formatMinutes, UNREACHABLE_COLOR } from "./colors.js";
 
 const MODE_SPEED_KMH = { car: 75, bike: 16, foot: 4.5 };
 
-// Cap on routed sample points so a large radius at a small cell size stays
-// responsive; the cell size is coarsened to fit when it would be exceeded.
-const MAX_ROUTE_POINTS = 1200;
+// Cap on rendered cells: a 450 km / 5 km payload is thousands of polygons, so
+// the displayed grid is coarsened (uniformly sub-sampled) past this to keep
+// Leaflet/Delaunay responsive. This replaces the old routing-volume cap — the
+// data resolution itself is fixed by the precomputed seed grid.
+const MAX_RENDER_CELLS = 2000;
 
-// Cache routing results by their deterministic inputs so re-running an
-// identical view (re-click, toggle a setting back) reuses data instead of
-// hitting the rate-limited routing API again. Bounded to the most recent few.
+// Reuse the payload for an identical re-run (toggle a setting back, re-click the
+// same spot) instead of re-hitting the RPC. Keyed by mode|radius|coarse-origin;
+// a server-side dataset refresh (new version id) clears the whole cache.
 const routeCache = new Map();
 const ROUTE_CACHE_MAX = 24;
+let currentVersionId = null;
 
 function cacheGet(key) {
   const hit = routeCache.get(key);
-  if (hit) { // refresh recency
-    routeCache.delete(key);
-    routeCache.set(key, hit);
-  }
+  if (hit) { routeCache.delete(key); routeCache.set(key, hit); }
   return hit;
 }
-
 function cacheSet(key, value) {
   routeCache.set(key, value);
-  if (routeCache.size > ROUTE_CACHE_MAX) {
-    routeCache.delete(routeCache.keys().next().value);
-  }
-}
-
-/**
- * Hex spacing in km: the requested cell size, enlarged just enough that the
- * number of cells covering the radius stays within MAX_ROUTE_POINTS.
- */
-function effectiveSpacingKm(radiusKm, desiredKm) {
-  const hexAreaKm2 = (s) => (Math.sqrt(3) / 2) * s * s;
-  const estCells = (Math.PI * radiusKm * radiusKm) / hexAreaKm2(desiredKm);
-  return estCells > MAX_ROUTE_POINTS
-    ? desiredKm * Math.sqrt(estCells / MAX_ROUTE_POINTS)
-    : desiredKm;
+  if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 }
 
 // --- Map setup -------------------------------------------------------------
@@ -65,9 +49,7 @@ const ui = {
   badge: document.getElementById("panel-badge"),
   badgeLabel: document.getElementById("badge-label"),
   mode: document.getElementById("mode"),
-  sampling: document.getElementById("sampling"),
   radius: document.getElementById("radius"),
-  density: document.getElementById("density"),
   opacity: document.getElementById("opacity"),
   status: document.getElementById("status"),
   legend: document.getElementById("legend"),
@@ -89,13 +71,11 @@ function collapsePanel() {
   ui.badge.hidden = false;
   ui.badge.setAttribute("aria-expanded", "false");
 }
-
 function expandPanel() {
   ui.panel.classList.remove("collapsed");
   ui.badge.hidden = true;
   ui.badge.setAttribute("aria-expanded", "true");
 }
-
 ui.minimizeBtn.addEventListener("click", collapsePanel);
 ui.badge.addEventListener("click", expandPanel);
 
@@ -103,15 +83,14 @@ function setStatus(text, kind = "") {
   ui.status.textContent = text;
   ui.status.className = `status ${kind}`;
 }
-
 function fillOpacity() {
   return Number(ui.opacity.value) / 100;
 }
 
 // --- State -----------------------------------------------------------------
 
-let origin = null;          // { lat, lng, label }
-let abortController = null; // cancels the in-flight computation
+let origin = null;          // { lat, lng, label } — the clicked point
+let abortController = null;  // cancels the in-flight computation
 
 // --- Origin selection ------------------------------------------------------
 
@@ -165,8 +144,6 @@ function setOrigin(point) {
   originMarker = L.marker([point.lat, point.lng], { title: point.label })
     .addTo(map)
     .bindTooltip(point.label, { direction: "top", offset: [-15, -10] });
-  // Show the chosen place on the reopen badge, and on phones collapse the
-  // panel so the freshly rendered map isn't hidden behind the controls.
   ui.badgeLabel.textContent = point.label;
   if (isNarrow()) collapsePanel();
   startCompute();
@@ -177,25 +154,20 @@ function startCompute() {
   compute().catch((err) => {
     if (err?.name === "AbortError") return;
     console.error(err);
-    setStatus(
-      `Something went wrong: ${err?.message ?? err}. Click the map or change a setting to retry.`,
-      "error");
+    setStatus(`Something went wrong: ${err?.message ?? err}. Click the map or change a setting to retry.`, "error");
   });
 }
 
-// Debounce rapid setting changes so flipping through options fires one
-// computation (each Overpass/OSRM round is expensive and rate-limited).
+// Debounce rapid setting changes so flipping through options fires one request.
 let settingsTimer;
-for (const el of [ui.mode, ui.sampling, ui.radius, ui.density]) {
+for (const el of [ui.mode, ui.radius]) {
   el.addEventListener("change", () => {
     if (!origin) return;
     clearTimeout(settingsTimer);
-    settingsTimer = setTimeout(startCompute, 350);
+    settingsTimer = setTimeout(startCompute, 300);
   });
 }
 
-// Last-resort net: anything that escapes startCompute (or event handlers)
-// still produces a visible message instead of a frozen UI.
 window.addEventListener("unhandledrejection", (e) => {
   if (e.reason?.name === "AbortError") return;
   console.error(e.reason);
@@ -209,7 +181,7 @@ ui.opacity.addEventListener("input", () => {
   cellLayer.eachLayer((layer) => layer.setStyle({ fillOpacity: fillOpacity() }));
 });
 
-// --- Core: sample points -> voronoi -> travel times -> colored cells --------
+// --- Core: fetch precomputed cells -> voronoi -> colored cells --------------
 
 async function compute() {
   abortController?.abort();
@@ -219,47 +191,114 @@ async function compute() {
 
   const mode = ui.mode.value;
   const radiusKm = Number(ui.radius.value);
-  const desiredKm = Number(ui.density.value);
-  const spacingKm = effectiveSpacingKm(radiusKm, desiredKm);
-  const coarsenedNote = spacingKm > desiredKm + 0.5
-    ? ` (cells enlarged to ~${Math.round(spacingKm)} km to stay responsive)`
-    : "";
-  // A point this far from any road gets its cell grayed as unreliable.
-  const snapLimitMeters = Math.max(1500, spacingKm * 600);
 
-  // Sample points: real road junctions (default) or a plain hex grid.
-  let inner = null;
-  let samplingUsed = ui.sampling.value;
-  let samplingNote = "";
-  if (samplingUsed === "nodes") {
-    setStatus("Finding road junctions…", "working");
-    try {
-      const nodes = await fetchRoadNodes(origin, radiusKm, signal);
-      if (signal.aborted) return;
-      const thinned = thinNodes(nodes, origin, spacingKm, MAX_ROUTE_POINTS);
-      if (thinned.length < 12) throw new Error("too few junctions in this area");
-      inner = [{ lat: origin.lat, lng: origin.lng }, ...thinned];
-    } catch (err) {
-      if (err.name === "AbortError") return;
-      samplingUsed = "grid";
-      samplingNote = " — junction lookup failed, using hex grid";
-    }
+  // Identical re-runs reuse the cached payload (no RPC). Coarse origin key
+  // (~100 m) collapses near-identical re-clicks; version change clears the cache.
+  const key = `${mode}|${radiusKm}|${origin.lat.toFixed(3)},${origin.lng.toFixed(3)}`;
+  const cached = cacheGet(key);
+  if (cached) {
+    renderPayload(cached, mode, radiusKm);
+    return;
   }
-  const grid = hexGrid(origin, radiusKm, spacingKm);
-  if (!inner) inner = grid.filter((p) => !p.edge);
-  // The off-map edge ring bounds the outermost Voronoi cells in both modes.
-  const points = [...inner, ...grid.filter((p) => p.edge)];
 
-  // Conservative color domain so cells can be colored as batches arrive;
-  // rescaled to the actual data once routing completes.
-  let domainMax = niceMaxMinutes(((radiusKm * 1.3) / MODE_SPEED_KMH[mode]) * 60);
-  renderLegend(domainMax);
+  setStatus("Loading travel times…", "working");
+  const payload = await fetchCells(origin, mode, radiusKm, { signal });
+  if (signal.aborted) return;
 
-  // Voronoi in locally-corrected equirectangular coordinates so cells are
-  // geometrically regular (longitude degrees shrink with latitude).
-  const cosLat = Math.cos((origin.lat * Math.PI) / 180);
+  // Reflect which modes the active snapshot actually has (R12).
+  if (payload.modes?.length) reflectModes(payload.modes);
+
+  switch (payload.status) {
+    case "ok":
+      // A new dataset version invalidates every cached payload.
+      if (payload.version?.id !== currentVersionId) {
+        routeCache.clear();
+        currentVersionId = payload.version?.id ?? null;
+      }
+      cacheSet(key, payload);
+      renderPayload(payload, mode, radiusKm);
+      return;
+    case "mode_unavailable":
+      cellLayer.clearLayers();
+      ui.legend.hidden = true;
+      setStatus(`“${mode}” isn’t available in this dataset. Pick another mode.`, "error");
+      return;
+    case "out_of_coverage": {
+      cellLayer.clearLayers();
+      ui.legend.hidden = true;
+      const near = payload.snapMeters ? ` (nearest data ~${Math.round(payload.snapMeters / 1000)} km away)` : "";
+      setStatus(`Outside coverage — choose a point inside Czechia${near}.`, "error");
+      return;
+    }
+    case "radius_too_small":
+      cellLayer.clearLayers();
+      ui.legend.hidden = true;
+      setStatus("Radius is smaller than the data resolution — increase the radius.", "error");
+      return;
+    case "unavailable":
+      cellLayer.clearLayers();
+      ui.legend.hidden = true;
+      setStatus(`Data service unavailable${payload.reason ? ` (${payload.reason})` : ""}. Click the map or retry.`, "error");
+      return;
+    default:
+      cellLayer.clearLayers();
+      setStatus("Unexpected response from the data service.", "error");
+  }
+}
+
+function reflectModes(modes) {
+  for (const opt of ui.mode.options) opt.disabled = !modes.includes(opt.value);
+}
+
+/** Build a ring of off-map points one grid step beyond the returned cells so the
+ *  outermost Voronoi cells stay bounded (replaces hexGrid's edge ring). */
+function edgeRing(seed, cellPoints, spacingKm) {
+  let maxKm = 0;
+  for (const p of cellPoints) maxKm = Math.max(maxKm, haversineKm(seed, p));
+  const ringKm = maxKm + spacingKm;
+  const n = Math.max(16, Math.ceil((2 * Math.PI * ringKm) / spacingKm));
+  const ring = [];
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n;
+    ring.push(offsetKm(seed, ringKm * Math.cos(a), ringKm * Math.sin(a)));
+  }
+  return ring;
+}
+
+function renderPayload(payload, mode, radiusKm) {
+  const seed = payload.seed;
+  const spacingKm = payload.version?.seedSpacingKm ?? 5;
+
+  // Move the marker to the snapped seed and note how far the click was moved (R9).
+  const snapKm = (payload.snapMeters ?? 0) / 1000;
+  if (originMarker) {
+    originMarker.setLatLng([seed.lat, seed.lng]);
+    originMarker.setTooltipContent(`${origin.label}${snapKm >= 0.05 ? ` (snapped ~${snapKm.toFixed(1)} km)` : ""}`);
+  }
+
+  // Render-cost cap: coarsen the displayed grid at large radii (R10).
+  const total = payload.cells.length;
+  let cells = payload.cells;
+  let coarsenedNote = "";
+  if (total > MAX_RENDER_CELLS) {
+    const step = Math.ceil(total / MAX_RENDER_CELLS);
+    cells = cells.filter((_, i) => i % step === 0);
+    coarsenedNote = ` (showing ${cells.length} of ${total} cells to stay responsive)`;
+  }
+
+  // Geometry strictly from the payload order: cellPoints[i] <-> seconds[i] (R8).
+  const cellPoints = cells.map((c) => ({ lat: c.lat, lng: c.lng }));
+  const minutes = cells.map((c) => (c.seconds == null ? null : c.seconds / 60));
+  const points = [...cellPoints, ...edgeRing(seed, cellPoints, spacingKm)];
+
+  // Color domain from the actual data (98th percentile), with a radius/mode
+  // fallback when nothing is reachable.
+  const domainMax = dataDomainMax(minutes) || niceMaxMinutes(((radiusKm * 1.3) / MODE_SPEED_KMH[mode]) * 60);
+
+  // Voronoi in locally-corrected equirectangular space (cosLat from the seed).
+  const cosLat = Math.cos((seed.lat * Math.PI) / 180);
   const delaunay = Delaunay.from(points, (p) => p.lng * cosLat, (p) => p.lat);
-  const pad = spacingKm / 100; // degrees, roughly
+  const pad = spacingKm / 100;
   const xs = points.map((p) => p.lng * cosLat);
   const ys = points.map((p) => p.lat);
   const voronoi = delaunay.voronoi([
@@ -268,112 +307,47 @@ async function compute() {
   ]);
 
   cellLayer.clearLayers();
-  // cells[i] corresponds to inner[i] (inner points are first in `points`).
-  const cells = inner.map((point, i) => {
+  let built = 0;
+  for (let i = 0; i < cellPoints.length; i++) {
     const polygon = voronoi.cellPolygon(i);
-    if (!polygon) return { point, layer: null, minutes: null, unreliable: false, done: false };
+    if (!polygon) continue;
+    const m = minutes[i];
     const latlngs = polygon.map(([x, y]) => [y, x / cosLat]);
     const layer = L.polygon(latlngs, {
       renderer: canvasRenderer,
       stroke: false,
-      fillColor: UNREACHABLE_COLOR,
-      fillOpacity: fillOpacity() * 0.35, // dim until its travel time arrives
+      fillColor: m === null ? UNREACHABLE_COLOR : colorFor(m / domainMax),
+      fillOpacity: fillOpacity(),
       interactive: true,
     }).addTo(cellLayer);
-    return { point, layer, minutes: null, unreliable: false, done: false };
-  });
-  if (!cells.some((c) => c.layer)) {
-    throw new Error("could not build any map cells for this area");
+    layer.bindTooltip(tooltipHtml(cellPoints[i], m, seed), { sticky: true });
+    built++;
+  }
+  if (built === 0) {
+    setStatus("Could not build map cells for this area.", "error");
+    return;
   }
 
-  const cellStyle = (cell) => ({
-    fillColor: cell.minutes === null || cell.unreliable
-      ? UNREACHABLE_COLOR
-      : colorFor(cell.minutes / domainMax),
-    fillOpacity: fillOpacity(),
-  });
-
-  // Color any cell whose duration has arrived. Batches finish out of order
-  // under concurrency, so we check each cell's own data rather than assuming a
-  // contiguous prefix is ready (undefined = not yet filled; null = unreachable).
-  const colorize = (durations, snapMeters) => {
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i];
-      if (!cell?.layer || cell.done || durations[i] === undefined) continue;
-      cell.minutes = durations[i] === null ? null : durations[i] / 60;
-      cell.unreliable = snapMeters[i] > snapLimitMeters;
-      cell.done = true;
-      cell.layer.setStyle(cellStyle(cell));
-      cell.layer.bindTooltip(tooltipHtml(cell, snapMeters[i]), { sticky: true });
-    }
-  };
-
-  // Inner points are deterministic from these inputs, so they key the cache.
-  const routeKey = `${samplingUsed}|${mode}|${radiusKm}|${Math.round(spacingKm)}|` +
-    `${origin.lat.toFixed(4)},${origin.lng.toFixed(4)}|${inner.length}`;
-
-  try {
-    let result = cacheGet(routeKey);
-    if (result) {
-      colorize(result.durations, result.snapMeters);
-    } else {
-      setStatus(`Routing ${inner.length} sample points…`, "working");
-      result = await travelTimes(origin, inner, mode, {
-        signal,
-        onProgress: (done, total, partialDurations, partialSnaps) => {
-          if (signal.aborted) return;
-          colorize(partialDurations, partialSnaps);
-          setStatus(`Routing… ${done}/${total} points`, "working");
-        },
-      });
-      if (signal.aborted) return;
-      // Only cache fully-real results; estimates should be retried next time.
-      if (result.source === "osrm") cacheSet(routeKey, result);
-    }
-    const { durations, snapMeters, source } = result;
-    colorize(durations, snapMeters);
-
-    // Stretch the palette over the actual data (98th percentile dodges outliers).
-    const dataMax = dataDomainMax(cells);
-    if (dataMax && dataMax !== domainMax) {
-      domainMax = dataMax;
-      renderLegend(domainMax);
-      for (const cell of cells) {
-        if (cell.done && cell.layer) cell.layer.setStyle(cellStyle(cell));
-      }
-    }
-
-    const sourceNote = source === "estimate"
-      ? " — routing API unreachable, showing straight-line estimates"
-      : "";
-    const cellsNote = samplingUsed === "nodes" ? "road-junction" : "hex-grid";
-    setStatus(
-      `${inner.length} ${cellsNote} cells from “${origin.label}” by ${mode}${coarsenedNote}${samplingNote}${sourceNote}.`,
-      source === "estimate" || samplingNote ? "error" : "");
-  } catch (err) {
-    if (err.name !== "AbortError") setStatus(`Failed: ${err.message}`, "error");
-  }
+  renderLegend(domainMax);
+  const extractDate = payload.version?.extractDate;
+  setStatus(
+    `${total} cells from “${origin.label}” by ${mode}${coarsenedNote}` +
+      `${extractDate ? ` · road data as of ${extractDate}` : ""}.`
+  );
 }
 
-function dataDomainMax(cells) {
-  const minutes = cells
-    .filter((c) => c.done && c.minutes !== null && !c.unreliable)
-    .map((c) => c.minutes)
-    .sort((a, b) => a - b);
-  if (minutes.length === 0) return null;
-  const p98 = minutes[Math.min(minutes.length - 1, Math.floor(minutes.length * 0.98))];
+/** 98th-percentile minutes, rounded to a nice legend max. null if nothing reachable. */
+function dataDomainMax(minutes) {
+  const vals = minutes.filter((m) => m !== null).sort((a, b) => a - b);
+  if (vals.length === 0) return null;
+  const p98 = vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.98))];
   return niceMaxMinutes(p98);
 }
 
-function tooltipHtml(cell, snapM) {
-  const dist = haversineKm(origin, cell.point).toFixed(0);
-  if (cell.minutes === null) {
-    return `<b>unreachable</b><br>${dist} km from ${origin.label}`;
-  }
-  if (cell.unreliable) {
-    return `<b>~${formatMinutes(cell.minutes)}</b> (nearest road ${(snapM / 1000).toFixed(1)} km away)<br>${dist} km from ${origin.label}`;
-  }
-  return `<b>${formatMinutes(cell.minutes)}</b><br>${dist} km from ${origin.label}`;
+function tooltipHtml(point, minutes, seed) {
+  const dist = haversineKm(seed, point).toFixed(0);
+  if (minutes === null) return `<b>unreachable</b><br>${dist} km from origin`;
+  return `<b>${formatMinutes(minutes)}</b><br>${dist} km from origin`;
 }
 
 function renderLegend(maxMinutes) {
