@@ -1,0 +1,9 @@
+# Dockerfile.db — PostGIS with the distvis schema + RPC baked into
+# /docker-entrypoint-initdb.d, so a fresh volume self-provisions on first boot.
+#
+# Coolify builds this from the repo (reliable), avoiding host bind-mounts of
+# repo files — which Coolify's Docker Compose deploy does not honor, leaving the
+# init scripts unmounted and the DB schemaless.
+FROM postgis/postgis:16-3.5
+COPY db/schema.sql /docker-entrypoint-initdb.d/10-schema.sql
+COPY db/rpc.sql    /docker-entrypoint-initdb.d/20-rpc.sql

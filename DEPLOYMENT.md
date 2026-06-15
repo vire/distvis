@@ -61,19 +61,21 @@ previous snapshot kept as `*_prev` for rollback).
      `db-init` reconcile and PostgREST (as `PGPASSWORD`), so they always match.
    - `SERVICE_FQDN_POSTGREST_3000` — a public TLS domain routed to PostgREST's
      port 3000. This URL is your `POSTGREST_BASE`.
-3. Deploy. On **first boot** the database runs `db/schema.sql` (PostGIS, the
-   private `dist` schema, the exposed `api` schema, RLS, the `anon` role) and
-   `db/rpc.sql` (the `api.cells_around` function + grants) from
-   `/docker-entrypoint-initdb.d`. These run only on an empty volume.
+3. Deploy. The `db` service is **built from `Dockerfile.db`**, which bakes
+   `db/schema.sql` + `db/rpc.sql` into `/docker-entrypoint-initdb.d`. On **first
+   boot** (empty volume) those run and create: PostGIS (in `public`), the private
+   `dist` schema, the exposed `api` schema, the `anon` role, the tables, and the
+   `api.cells_around` function. (Baking is required — Coolify's compose deploy
+   does **not** honor host bind-mounts of repo files, so mounting the SQL leaves
+   the DB schemaless. Don't switch `db` back to a bare `image:` + bind mounts.)
 
-   The `authenticator` **login** role is handled separately by the `db-init`
-   service, which runs on **every** deploy: it creates the role if missing and
-   re-sets its password to the current `SERVICE_PASSWORD_AUTHENTICATOR`, then
-   grants it `anon`. PostgREST waits for `db-init` to finish. This is what keeps
-   the role's password from drifting out of sync with PostgREST (the failure
-   mode where PostgREST crash-loops on `password authentication failed for user
-   "authenticator"`). Later schema changes in `db/*.sql` are applied by hand —
-   see Refreshing.
+   The `authenticator` **login** role is handled by the `db-init` service, which
+   runs on **every** deploy: it creates `anon`/`authenticator` if missing and
+   re-sets `authenticator`'s password to the current `SERVICE_PASSWORD_AUTHENTICATOR`,
+   then grants it `anon`. PostgREST waits for `db-init`. This keeps the role
+   password from drifting out of sync with PostgREST (the crash-loop on
+   `password authentication failed for user "authenticator"`). Later schema
+   changes in `db/*.sql` ship by rebuilding the image / on the next fresh volume.
 4. **Verify exposure** once it's up: `GET https://<api-domain>/seed` and
    `/matrix` must return nothing (404 / empty) — only `/rpc/cells_around` is
    reachable. This is the `db-schemas=api` boundary (KTD8 / code-review #13);
@@ -83,6 +85,12 @@ The compose connects PostgREST to the DB over Coolify's internal network and
 supplies the password via `PGPASSWORD` (not inline in the URI), so no credential
 is ever committed — the deploy secret-guard (`scripts/check-no-secrets.sh`)
 enforces that.
+
+> **Already deployed with an empty/schemaless DB?** The baked init only runs on
+> a fresh volume. If `db` was created before this Dockerfile (no `dist`/`api`
+> schema), delete the `db` data volume in Coolify (no real data is lost until the
+> matrix is loaded) and redeploy so the init runs. Confirm with
+> `psql … -c "\dn"` showing `dist` and `api`.
 
 ## 2. CORS + rate limit (Traefik middleware)
 
@@ -104,12 +112,31 @@ frontend domain from step 4) and `<router-name>` with the router Coolify
 generated for the PostgREST service. CORS is defense-in-depth; the real boundary
 is the RPC hardening in `db/rpc.sql`.
 
-## 3. Build & load the matrix (precompute profile)
+## 3. Build & load the matrix
 
-The matrix build is a **one-shot batch job** baked into the same compose under
-the `precompute` profile — so it does **not** run on a normal deploy. Trigger it
-on demand from the Coolify resource's **terminal** (or a Coolify Scheduled Task
-for periodic refreshes):
+> **Reliable path: run the precompute locally**, then load into the Coolify DB.
+> The in-Coolify `precompute` profile below mounts repo files (`.:/repo`,
+> `seeds.mjs`/`load.sql`), and — like the DB init scripts — **Coolify's compose
+> deploy doesn't honor those host bind-mounts**, so it won't find the scripts.
+> Until the precompute steps are baked into images too, build locally:
+>
+> ```sh
+> cd precompute && docker compose up -d            # local OSRM (car)
+> node seeds.mjs && node build-matrix.mjs           # -> seeds.csv, matrix.csv
+> docker compose down
+> psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 \
+>   -v extract_date="2026-06-14" -v profile_version="osrm car (ch)" \
+>   -v seed_spacing_km=5 -v seed_set_hash="$(cat seed_set_hash.txt)" \
+>   -f load.sql
+> psql "$COOLIFY_DB_URL" -v ON_ERROR_STOP=1 -f ../db/checks.sql
+> ```
+>
+> `$COOLIFY_DB_URL` is the DB owner connection Coolify shows for the resource.
+
+The `precompute` profile below is the intended in-Coolify path **once its steps
+are baked into images** (tracked as follow-up). It is a **one-shot batch job** —
+it does **not** run on a normal deploy. When baked, trigger it on demand from the
+Coolify resource's **terminal** (or a Scheduled Task):
 
 ```sh
 # Detached so the one-shots run to completion without tearing down db/postgrest.

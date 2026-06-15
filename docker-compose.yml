@@ -16,7 +16,13 @@
 
 services:
   db:
-    image: postgis/postgis:16-3.5
+    # Built from Dockerfile.db, which BAKES db/schema.sql + db/rpc.sql into
+    # /docker-entrypoint-initdb.d. Coolify builds from the repo, so the init
+    # scripts are reliably present — host bind-mounts of repo files are NOT
+    # honored by Coolify's compose deploy (they left the DB schemaless).
+    build:
+      context: .
+      dockerfile: Dockerfile.db
     restart: unless-stopped
     environment:
       POSTGRES_DB: distvis
@@ -24,11 +30,6 @@ services:
       POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
     volumes:
       - distvis-db-data:/var/lib/postgresql/data
-      # First-boot-only provisioning (runs alphabetically, as the superuser).
-      # The login `authenticator` role is NOT created here — it's reconciled on
-      # every deploy by db-init below, so its password never drifts from env.
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
-      - ./db/rpc.sql:/docker-entrypoint-initdb.d/20-rpc.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d distvis"]
       interval: 5s
@@ -58,14 +59,17 @@ services:
       - -c
       - |
         set -e
-        # tolerate "role already exists"; CREATE has no password to interpolate.
+        # Self-sufficient role provisioning (tolerate "already exists"); CREATE
+        # has no password to interpolate. anon is also created by schema.sql on a
+        # fresh volume — creating it here too means GRANT can't fail if it isn't.
+        psql -c "CREATE ROLE anon NOLOGIN" 2>/dev/null || true
         psql -c "CREATE ROLE authenticator LOGIN" 2>/dev/null || true
         # :'pw' interpolation only works via stdin/-f (NOT -c), so feed a heredoc.
         psql -v ON_ERROR_STOP=1 -v pw="$$AUTHENTICATOR_PASSWORD" <<'SQL'
         ALTER ROLE authenticator WITH LOGIN PASSWORD :'pw';
         GRANT anon TO authenticator;
         SQL
-        echo "authenticator role reconciled"
+        echo "roles reconciled (anon, authenticator)"
 
   postgrest:
     image: postgrest/postgrest:latest
