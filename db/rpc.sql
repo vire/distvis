@@ -49,7 +49,7 @@ declare
 begin
   -- Active snapshot metadata.
   select array(select unnest(modes) order by 1),
-         jsonb_build_object('id', id, 'extractDate', extract_date),
+         jsonb_build_object('id', id, 'extractDate', extract_date, 'seedSpacingKm', seed_spacing_km),
          seed_spacing_km
     into v_modes, v_version, v_spacing
     from dist.matrix_version
