@@ -57,11 +57,14 @@ services:
       - bash
       - -c
       - |
-        # tolerate "role already exists"; ALTER + GRANT are idempotent.
+        set -e
+        # tolerate "role already exists"; CREATE has no password to interpolate.
         psql -c "CREATE ROLE authenticator LOGIN" 2>/dev/null || true
-        psql -v ON_ERROR_STOP=1 -v pw="$$AUTHENTICATOR_PASSWORD" \
-          -c "ALTER ROLE authenticator WITH LOGIN PASSWORD :'pw'" \
-          -c "GRANT anon TO authenticator"
+        # :'pw' interpolation only works via stdin/-f (NOT -c), so feed a heredoc.
+        psql -v ON_ERROR_STOP=1 -v pw="$$AUTHENTICATOR_PASSWORD" <<'SQL'
+        ALTER ROLE authenticator WITH LOGIN PASSWORD :'pw';
+        GRANT anon TO authenticator;
+        SQL
         echo "authenticator role reconciled"
 
   postgrest:
