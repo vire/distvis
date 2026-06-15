@@ -219,31 +219,34 @@ async function compute() {
       renderPayload(payload, mode, radiusKm);
       return;
     case "mode_unavailable":
-      cellLayer.clearLayers();
-      ui.legend.hidden = true;
+      clearCells();
       setStatus(`“${mode}” isn’t available in this dataset. Pick another mode.`, "error");
       return;
     case "out_of_coverage": {
-      cellLayer.clearLayers();
-      ui.legend.hidden = true;
+      clearCells();
       const near = payload.snapMeters ? ` (nearest data ~${Math.round(payload.snapMeters / 1000)} km away)` : "";
       setStatus(`Outside coverage — choose a point inside Czechia${near}.`, "error");
       return;
     }
     case "radius_too_small":
-      cellLayer.clearLayers();
-      ui.legend.hidden = true;
+      clearCells();
       setStatus("Radius is smaller than the data resolution — increase the radius.", "error");
       return;
     case "unavailable":
-      cellLayer.clearLayers();
-      ui.legend.hidden = true;
+      clearCells();
       setStatus(`Data service unavailable${payload.reason ? ` (${payload.reason})` : ""}. Click the map or retry.`, "error");
       return;
     default:
-      cellLayer.clearLayers();
+      clearCells();
       setStatus("Unexpected response from the data service.", "error");
   }
+}
+
+/** Clear rendered cells and hide the legend — used by every non-ok state so a
+ *  stale legend never lingers (the default arm previously forgot the legend). */
+function clearCells() {
+  cellLayer.clearLayers();
+  ui.legend.hidden = true;
 }
 
 function reflectModes(modes) {
@@ -256,7 +259,9 @@ function edgeRing(seed, cellPoints, spacingKm) {
   let maxKm = 0;
   for (const p of cellPoints) maxKm = Math.max(maxKm, haversineKm(seed, p));
   const ringKm = maxKm + spacingKm;
-  const n = Math.max(16, Math.ceil((2 * Math.PI * ringKm) / spacingKm));
+  // 16–128 points: enough to bound the outer cells at any radius without feeding
+  // hundreds of phantom points to Delaunay at large radii.
+  const n = Math.min(128, Math.max(16, Math.ceil((2 * Math.PI * ringKm) / spacingKm)));
   const ring = [];
   for (let i = 0; i < n; i++) {
     const a = (2 * Math.PI * i) / n;

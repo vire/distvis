@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { offsetKm } from "../js/geo.js";
+import { offsetKm, KM_PER_DEG_LAT, KM_PER_DEG_LNG_EQUATOR } from "../js/geo.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -74,8 +74,8 @@ function pointInPolygons(lng, lat, polygons) {
 const boundary = loadBoundary();
 const rowStepKm = SPACING_KM * (Math.sqrt(3) / 2);
 // Span from the SW anchor to the NE corner, in km, via the app's offset convention.
-const heightKm = (BBOX.maxLat - BBOX.minLat) * 110.574;
-const widthKm = (BBOX.maxLng - BBOX.minLng) * 111.32 * Math.cos((ANCHOR.lat * Math.PI) / 180);
+const heightKm = (BBOX.maxLat - BBOX.minLat) * KM_PER_DEG_LAT;
+const widthKm = (BBOX.maxLng - BBOX.minLng) * KM_PER_DEG_LNG_EQUATOR * Math.cos((ANCHOR.lat * Math.PI) / 180);
 const maxRow = Math.ceil(heightKm / rowStepKm);
 const maxCol = Math.ceil(widthKm / SPACING_KM);
 

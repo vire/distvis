@@ -58,9 +58,11 @@ Frontend modules (browser ES modules, no framework):
   RPC and returns the frontend's own `{ seed, snapMeters, cells, modes, version }`
   shape. The backend can be swapped here without touching `compute()`.
 - **`js/config.js`** — public deploy config (PostgREST base URL + anon JWT). No secrets.
-- **`js/geo.js`** — `haversineKm`, `offsetKm` (and the equirectangular `cosLat`
-  convention). A **shared kernel**: imported by both the browser app and the
-  Node `precompute/seeds.mjs`, so it must stay environment-neutral.
+- **`js/geo.js`** — `haversineKm`, `offsetKm`, and the `KM_PER_DEG_LAT` /
+  `KM_PER_DEG_LNG_EQUATOR` earth-model constants. The equirectangular `cosLat`
+  scale is applied inline in `main.js` and `seeds.mjs` — a convention, not an
+  export. A **shared kernel**: imported by both the browser app and the Node
+  `precompute/seeds.mjs`, so it must stay environment-neutral.
 - **`js/colors.js`** — the green→purple travel-time scale and legend formatting.
 
 Backend:

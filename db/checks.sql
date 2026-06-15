@@ -5,6 +5,10 @@
 
 \set ON_ERROR_STOP on
 
+-- Put the PostGIS schema on the path so the bare KNN operator (<->) in U2
+-- resolves; all table/function refs below stay explicitly schema-qualified.
+set search_path = public, extensions;
+
 -- ===========================================================================
 -- U1 — schema & PostGIS provisioning
 -- ===========================================================================
@@ -133,6 +137,13 @@ begin
    where origin_seed_id = dest_seed_id and seconds is distinct from 0;
   assert bad_diag = 0, format('%s live diagonal entries are not zero', bad_diag);
 
+  -- RLS survived the swap: the renamed-in live tables must still have it on
+  -- (defense-in-depth — load.sql enables RLS on the staging tables).
+  assert (select bool_and(relrowsecurity) from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname='dist' and c.relname in ('seed','matrix')),
+    'RLS is not enabled on live dist.seed/dist.matrix after the swap';
+
   raise notice 'U4 load checks passed (active version %, % rows)', active_id, actual;
 end
 $$;
@@ -169,8 +180,12 @@ begin
   -- Input hardening: NaN / null coerce to out_of_coverage, not an error.
   assert api.cells_around('NaN'::double precision, 50.0, 0::smallint, 50000)->>'status' = 'out_of_coverage',
     'NaN lng should be out_of_coverage';
+  assert api.cells_around('infinity'::double precision, 50.0, 0::smallint, 50000)->>'status' = 'out_of_coverage',
+    'Infinity lng should be out_of_coverage';
   assert api.cells_around(null, null, 0::smallint, 50000)->>'status' = 'out_of_coverage',
     'null coords should be out_of_coverage';
+  assert api.cells_around(14.42, 50.08, 0::smallint, null)->>'status' = 'radius_too_small',
+    'null radius should clamp to 0 -> radius_too_small';
 
   -- Mode whitelist: a mode absent from the snapshot.
   assert api.cells_around(14.42, 50.08, 9::smallint, 50000)->>'status' = 'mode_unavailable',

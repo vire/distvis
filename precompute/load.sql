@@ -24,6 +24,10 @@ drop table if exists dist.matrix_stage;
 create table dist.seed_raw (id integer, lng double precision, lat double precision);
 \copy dist.seed_raw(id,lng,lat) from 'seeds.csv' with (format csv, header true)
 create table dist.seed_stage (id integer primary key, geom extensions.geography(Point,4326) not null);
+-- Enable RLS on staging so the renamed-in live table keeps schema.sql's
+-- defense-in-depth posture after the swap (the table owner bypasses RLS, so the
+-- load below is unaffected).
+alter table dist.seed_stage enable row level security;
 insert into dist.seed_stage(id, geom)
   select id, extensions.st_setsrid(extensions.st_makepoint(lng, lat), 4326)::extensions.geography
   from dist.seed_raw;
@@ -36,7 +40,9 @@ create table dist.matrix_stage (
   mode smallint not null, origin_seed_id integer not null,
   dest_seed_id integer not null, seconds integer
 );
+alter table dist.matrix_stage enable row level security;  -- preserved through the swap
 \copy dist.matrix_stage(mode,origin_seed_id,dest_seed_id,seconds) from 'matrix.csv' with (format csv)
+set maintenance_work_mem = '1GB';  -- keep the PK build + CLUSTER in memory at tens of millions of rows
 alter table dist.matrix_stage add primary key (mode, origin_seed_id, dest_seed_id);
 cluster dist.matrix_stage using matrix_stage_pkey;
 analyze dist.seed_stage;
@@ -87,25 +93,27 @@ begin
 end
 $$;
 
--- 4. Record the new snapshot (active=false until the swap commits).
-insert into dist.matrix_version
-  (extract_date, profile_version, seed_spacing_km, seed_set_hash, modes,
-   expected_row_count, actual_row_count, previous_version_id, active)
-select
-  :'extract_date'::date,
-  :'profile_version',
-  :'seed_spacing_km'::numeric,
-  :'seed_set_hash',
-  (select array_agg(distinct mode order by mode) from dist.matrix_stage),
-  (select count(distinct mode) from dist.matrix_stage) * (select count(*) from dist.seed_stage)::bigint * (select count(*) from dist.seed_stage)::bigint,
-  (select count(*) from dist.matrix_stage),
-  (select id from dist.matrix_version where active),
-  false
-returning id as new_version_id \gset
-
--- 5. Publish: all renames + the active flip in ONE transaction (KTD7) so a
---    concurrent RPC reads only the whole-old or whole-new snapshot.
+-- 4+5. Record the new snapshot AND publish in ONE transaction (KTD7): the
+--      version INSERT, all renames, and the active flip commit together, so a
+--      failed swap leaves no orphan version row and a concurrent RPC reads only
+--      the whole-old or whole-new snapshot.
 begin;
+  -- New snapshot row (active=false), capturing its id and the outgoing active id.
+  insert into dist.matrix_version
+    (extract_date, profile_version, seed_spacing_km, seed_set_hash, modes,
+     expected_row_count, actual_row_count, previous_version_id, active)
+  select
+    :'extract_date'::date,
+    :'profile_version',
+    :'seed_spacing_km'::numeric,
+    :'seed_set_hash',
+    (select array_agg(distinct mode order by mode) from dist.matrix_stage),
+    (select count(distinct mode) from dist.matrix_stage) * (select count(*) from dist.seed_stage)::bigint * (select count(*) from dist.seed_stage)::bigint,
+    (select count(*) from dist.matrix_stage),
+    (select id from dist.matrix_version where active),
+    false
+  returning id as new_version_id \gset
+
   drop table if exists dist.seed_prev;
   drop table if exists dist.matrix_prev;
   alter table if exists dist.seed   rename to seed_prev;

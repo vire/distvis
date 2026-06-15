@@ -7,7 +7,8 @@
 -- surface can't reorder or page it). The document is `status`-tagged so the
 -- frontend branches without parsing errors:
 --
---   {status:"ok", seed:{lat,lng}, snapMeters, modes:[..], version:{id,extractDate},
+--   {status:"ok", seed:{lat,lng}, snapMeters, modes:[..],
+--    version:{id,extractDate,seedSpacingKm},
 --    cells:[{lat,lng,seconds|null}, ...]}                         -- happy path
 --   {status:"out_of_coverage", snapMeters?, modes, version}       -- outside CZ / snap too far
 --   {status:"radius_too_small", seed, snapMeters, modes, version} -- < MIN_CELLS in radius

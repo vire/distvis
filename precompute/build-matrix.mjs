@@ -52,7 +52,9 @@ async function emit(line) {
 async function osrmTableTile(base, srcSeeds, destSeeds, signal) {
   const coords = [...srcSeeds, ...destSeeds].map((p) => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(";");
   const sources = srcSeeds.map((_, i) => i).join(";");
-  const destinations = srcSeeds.map((_, i) => srcSeeds.length + i).join(";");
+  // Destinations occupy coord indices [srcSeeds.length .. srcSeeds.length+destSeeds.length).
+  // Must iterate destSeeds, not srcSeeds — on a ragged final tile the lengths differ.
+  const destinations = destSeeds.map((_, i) => srcSeeds.length + i).join(";");
   const url = `${base}/table/v1/driving/${coords}?sources=${sources}&destinations=${destinations}&annotations=duration`;
   const res = await fetch(url, { signal });
   if (!res.ok) {
@@ -101,8 +103,13 @@ for (const { key, mode, base } of MODES) {
         let chunk = "";
         for (let j = 0; j < destSeeds.length; j++) {
           const v = row[j];
-          if (v == null) { nulls++; nullsByMode[key]++; }
-          chunk += `${mode},${srcSeeds[i].id},${destSeeds[j].id},${v == null ? "" : Math.round(v)}\n`;
+          // Force an exact 0 on the diagonal: OSRM's self-distance can round to a
+          // small non-zero, which would trip load.sql's zero-diagonal gate.
+          let seconds;
+          if (srcSeeds[i].id === destSeeds[j].id) seconds = "0";
+          else if (v == null) { nulls++; nullsByMode[key]++; seconds = ""; }
+          else seconds = String(Math.round(v));
+          chunk += `${mode},${srcSeeds[i].id},${destSeeds[j].id},${seconds}\n`;
         }
         await emit(chunk);
         rows += destSeeds.length;

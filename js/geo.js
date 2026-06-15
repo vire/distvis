@@ -1,8 +1,10 @@
 // Geographic helpers: distances and sample-point grids.
 
 const EARTH_RADIUS_KM = 6371;
-const KM_PER_DEG_LAT = 110.574;
-const KM_PER_DEG_LNG_EQUATOR = 111.32;
+// Exported so offline tooling (precompute/seeds.mjs) shares the same earth model
+// instead of duplicating the literals.
+export const KM_PER_DEG_LAT = 110.574;
+export const KM_PER_DEG_LNG_EQUATOR = 111.32;
 
 export function haversineKm(a, b) {
   const toRad = (d) => (d * Math.PI) / 180;
