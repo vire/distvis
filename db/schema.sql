@@ -12,9 +12,11 @@
 
 begin;
 
--- PostGIS in its own schema, never public.
-create schema if not exists extensions;
-create extension if not exists postgis with schema extensions;
+-- PostGIS lives in `public` (the postgis base image preinstalls it there, and
+-- the extension is not relocatable). The sensitive thing — the base tables — is
+-- isolated in the private `dist` schema below, which is what the exposure model
+-- depends on; PostGIS functions in public are harmless.
+create extension if not exists postgis;
 
 -- Private base-data schema (do NOT expose via PostgREST db-schemas).
 create schema if not exists dist;
@@ -45,7 +47,7 @@ create unique index if not exists matrix_version_one_active
 -- never a sequence. geography(Point,4326) keeps snap + radius in true meters (KTD3).
 create table if not exists dist.seed (
   id   integer primary key,
-  geom extensions.geography(Point, 4326) not null
+  geom geography(Point, 4326) not null
 );
 create index if not exists seed_geom_gix on dist.seed using gist (geom);
 

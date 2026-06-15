@@ -15,7 +15,7 @@
 --   {status:"unavailable"}                                 -- no active snapshot
 --
 -- search_path = '' (hijack-safe): every object is schema-qualified, and the two
--- KNN uses go through OPERATOR(extensions.<->) since operators cannot be
+-- KNN uses go through OPERATOR(public.<->) since operators cannot be
 -- qualified inline. SECURITY DEFINER so it can read the private `dist` schema;
 -- the function must be owned by a role with SELECT on dist (the migration runner
 -- owns it by default; for least privilege create a dedicated owner with SELECT
@@ -38,9 +38,9 @@ declare
   v_version  jsonb;
   v_spacing  double precision;
   v_radius   double precision;
-  v_point    extensions.geography;
+  v_point    public.geography;
   v_seed_id  integer;
-  v_seed     extensions.geography;
+  v_seed     public.geography;
   v_seed_obj jsonb;
   v_snap_m   double precision;
   v_cells    jsonb;
@@ -71,16 +71,16 @@ begin
   if v_radius <> v_radius then v_radius := 0; end if;  -- NaN
   v_radius := least(greatest(v_radius, 0), radius_max);
 
-  v_point := extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography;
+  v_point := public.st_setsrid(public.st_makepoint(p_lng, p_lat), 4326)::public.geography;
 
   -- Snap to nearest seed (KNN; OPERATOR(...) form required under empty search_path).
   select id, geom
     into v_seed_id, v_seed
     from dist.seed
-   order by geom OPERATOR(extensions.<->) v_point
+   order by geom OPERATOR(public.<->) v_point
    limit 1;
 
-  v_snap_m := extensions.st_distance(v_seed, v_point);
+  v_snap_m := public.st_distance(v_seed, v_point);
 
   -- Coverage cutoff (R9): a click more than one grid step from any seed is out.
   if v_snap_m > v_spacing * 1000 then
@@ -89,8 +89,8 @@ begin
   end if;
 
   v_seed_obj := jsonb_build_object(
-    'lat', extensions.st_y(v_seed::extensions.geometry),
-    'lng', extensions.st_x(v_seed::extensions.geometry));
+    'lat', public.st_y(v_seed::public.geometry),
+    'lng', public.st_x(v_seed::public.geometry));
 
   -- Destinations within radius. In-radius unreachable seeds are INCLUDED with
   -- seconds=null; out-of-radius seeds are simply absent (KTD5, R7). Capped to
@@ -100,13 +100,13 @@ begin
       from dist.matrix m
       join dist.seed d on d.id = m.dest_seed_id
      where m.origin_seed_id = v_seed_id
-       and extensions.st_dwithin(d.geom, v_seed, v_radius)
-     order by v_seed OPERATOR(extensions.<->) d.geom
+       and public.st_dwithin(d.geom, v_seed, v_radius)
+     order by v_seed OPERATOR(public.<->) d.geom
      limit cell_cap
   )
   select jsonb_agg(jsonb_build_object(
-           'lat', extensions.st_y(geom::extensions.geometry),
-           'lng', extensions.st_x(geom::extensions.geometry),
+           'lat', public.st_y(geom::public.geometry),
+           'lng', public.st_x(geom::public.geometry),
            'seconds', seconds)),
          count(*)
     into v_cells, v_count
