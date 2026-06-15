@@ -7,24 +7,47 @@ distvis has three pieces:
 | Static frontend (`index.html`, `js/`, `css/`) | GitHub Pages **or** Coolify | A pure static site; only needs `js/config.js` pointed at the API. |
 | Postgres + **PostGIS** | **Coolify** | The travel-time matrix + seed grid. |
 | **PostgREST** | **Coolify** | The read-only API the browser calls. |
-| Precompute (OSRM → `matrix.csv`) | **Offline / one-off** | Not hosted — run locally per `precompute/README.md`, then load into the Coolify DB. |
+| Precompute (OSRM → `matrix.csv`) | **One-shot batch** | Not part of serving. Runs on demand via the `precompute` profile in the root compose (or locally) to populate/refresh the DB. |
 
 The always-on backend (Postgres/PostGIS + PostgREST) ships as a single
 **`docker-compose.yml` at the repo root** — the file Coolify's Docker Compose
-deployment looks for by default. (The `precompute/docker-compose.yml` is the
-separate *offline* OSRM stack and is not deployed.)
+deployment looks for by default. The same file also carries the precompute
+pipeline under a `precompute` profile, so it is **not** started on a normal
+deploy. (The `precompute/docker-compose.yml` is the separate *offline* OSRM
+stack for building locally.)
 
 Coolify's UI changes between versions; the resource *types* and *environment
 variables* below are what matter — adapt the exact button names to your version.
+
+## First-time bring-up (order matters)
+
+A fresh deploy is **blank** until the matrix is loaded — until then the RPC
+returns `{status:"unavailable"}` and the map shows "data service unavailable".
+The precompute is **not** in the serving path; it's the step that *populates*
+production. Do this once, in order:
+
+1. **Deploy the backend** (§1) — `db` + `postgrest` come up; the schema, RPC, and
+   roles are created automatically, but `dist.matrix` is empty.
+2. **Restrict CORS + rate limit** (§2) and point `js/config.js` at the API (§4).
+3. **Build & load the matrix** (§3) — `docker compose --profile precompute up -d`.
+   This is what makes prod usable; the API stays `unavailable` until it finishes
+   (one `matrix_version` row goes `active = true`).
+4. **Verify** — a central-CZ click colors the map, and `GET /seed` / `/matrix`
+   return nothing (only `/rpc/cells_around` works).
+
+After that, serving never runs OSRM or the precompute again — the matrix is a
+static snapshot. **Refresh** = re-run step 3 (atomic swap, zero downtime,
+previous snapshot kept as `*_prev` for rollback).
 
 ## Prerequisites
 
 - A running Coolify instance with a server/destination and a project.
 - A domain (or subdomain) for the API; Coolify provisions Let's Encrypt TLS via
   its Traefik proxy.
-- The precompute outputs ready locally: `precompute/seeds.csv`,
-  `precompute/matrix.csv`, `precompute/seeds.meta.json` (see
-  `precompute/README.md`).
+- Enough headroom on the Coolify host for the one-time OSRM build (the precompute
+  profile downloads the ~1 GB CZ extract and `osrm-extract` needs a few GB RAM
+  transiently). The matrix itself is built by the profile — you don't need any
+  precompute outputs in advance. (Building locally instead is an option — see §3.)
 
 ## 1. Deploy the backend (recommended: Docker Compose)
 
