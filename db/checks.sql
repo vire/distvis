@@ -35,8 +35,12 @@ begin
   assert exists (select 1 from pg_indexes
                  where schemaname='dist' and tablename='seed' and indexdef ilike '%using gist%'),
     'GiST index on dist.seed.geom is missing';
-  assert exists (select 1 from pg_indexes
-                 where schemaname='dist' and tablename='matrix' and indexname = 'matrix_pkey'),
+  -- Name-agnostic: the atomic swap renames staging tables in, so the live PK
+  -- index name may differ from matrix_pkey. Assert the PK constraint exists.
+  assert exists (select 1 from pg_constraint con
+                 join pg_class c on c.oid = con.conrelid
+                 join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname='dist' and c.relname='matrix' and con.contype='p'),
     'primary key on dist.matrix is missing';
 
   -- RLS enabled on every base table (defense-in-depth).
@@ -90,3 +94,49 @@ end
 $$;
 -- Determinism (manual): re-run precompute/seeds.mjs and confirm seeds.meta.json's
 -- seedSetHash is unchanged, and matches dist.matrix_version.seed_set_hash after load.
+
+-- ===========================================================================
+-- U4 — matrix load & atomic-swap snapshot (run after load.sql)
+-- ===========================================================================
+do $$
+declare
+  active_id int;
+  expected  bigint;
+  actual    bigint;
+  bad_ref   bigint;
+  bad_diag  bigint;
+begin
+  -- Exactly one active snapshot.
+  assert (select count(*) from dist.matrix_version where active) = 1,
+    'there must be exactly one active matrix_version';
+  select id, expected_row_count, actual_row_count
+    into active_id, expected, actual
+    from dist.matrix_version where active;
+
+  -- Live row count matches what the active version recorded, and N x N x modes.
+  assert (select count(*) from dist.matrix) = actual,
+    'live matrix row count != active version actual_row_count';
+  assert expected = actual,
+    format('active version expected (%s) != actual (%s)', expected, actual);
+
+  -- Referential integrity on the LIVE tables (same snapshot — R17/R18).
+  select count(*) into bad_ref from (
+    select origin_seed_id as id from dist.matrix
+    union
+    select dest_seed_id from dist.matrix
+  ) ids
+  where not exists (select 1 from dist.seed s where s.id = ids.id);
+  assert bad_ref = 0, format('%s live matrix seed ids missing from live seed', bad_ref);
+
+  -- Zero diagonal on the live matrix.
+  select count(*) into bad_diag from dist.matrix
+   where origin_seed_id = dest_seed_id and seconds is distinct from 0;
+  assert bad_diag = 0, format('%s live diagonal entries are not zero', bad_diag);
+
+  raise notice 'U4 load checks passed (active version %, % rows)', active_id, actual;
+end
+$$;
+
+-- Atomic-swap correctness (structural): confirm load.sql wraps the renames +
+-- active flip in a single BEGIN..COMMIT. Atomicity follows from PG transactional
+-- DDL; no concurrent-reader harness is needed (this project has no test runner).
