@@ -16,15 +16,22 @@ const MAX_RENDER_CELLS = 2000;
 // a server-side dataset refresh (new version id) clears the whole cache.
 const routeCache = new Map();
 const ROUTE_CACHE_MAX = 24;
+// A cache hit can't outlive this window, so a server-side dataset refresh
+// self-heals within the session without a per-call version probe (a hit never
+// re-checks the version; only a miss runs the version-change invalidation).
+const ROUTE_CACHE_TTL_MS = 5 * 60 * 1000;
 let currentVersionId = null;
 
 function cacheGet(key) {
   const hit = routeCache.get(key);
-  if (hit) { routeCache.delete(key); routeCache.set(key, hit); }
-  return hit;
+  if (!hit) return undefined;
+  routeCache.delete(key);
+  if (Date.now() - hit.t > ROUTE_CACHE_TTL_MS) return undefined; // expired -> miss (re-fetches)
+  routeCache.set(key, hit); // refresh recency
+  return hit.payload;
 }
-function cacheSet(key, value) {
-  routeCache.set(key, value);
+function cacheSet(key, payload) {
+  routeCache.set(key, { payload, t: Date.now() });
   if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 }
 
@@ -218,10 +225,20 @@ async function compute() {
       cacheSet(key, payload);
       renderPayload(payload, mode, radiusKm);
       return;
-    case "mode_unavailable":
+    case "mode_unavailable": {
+      // The selected mode isn't in the snapshot. If another mode is available,
+      // switch to it and re-run rather than leaving the user stuck (disabling
+      // the <option> alone does not change ui.mode.value).
+      const fallback = payload.modes?.find((m) => m !== mode);
+      if (fallback) {
+        ui.mode.value = fallback;
+        startCompute();
+        return;
+      }
       clearCells();
-      setStatus(`“${mode}” isn’t available in this dataset. Pick another mode.`, "error");
+      setStatus(`“${mode}” isn’t available in this dataset, and no other mode is either.`, "error");
       return;
+    }
     case "out_of_coverage": {
       clearCells();
       const near = payload.snapMeters ? ` (nearest data ~${Math.round(payload.snapMeters / 1000)} km away)` : "";

@@ -153,6 +153,37 @@ $$;
 -- DDL; no concurrent-reader harness is needed (this project has no test runner).
 
 -- ===========================================================================
+-- U4b — fault injection: prove the load.sql validation predicates actually
+-- CATCH bad data (not just that clean data passes). Self-contained temp tables.
+-- ===========================================================================
+do $$
+declare bad bigint;
+begin
+  create temp table _seed_fi (id integer primary key) on commit drop;
+  insert into _seed_fi values (1), (2);
+  create temp table _matrix_fi (mode smallint, origin_seed_id int, dest_seed_id int, seconds int) on commit drop;
+  insert into _matrix_fi values
+    (0, 1, 1, 5),    -- non-zero diagonal (should be 0)
+    (0, 1, 2, 100),
+    (0, 2, 1, -3),   -- negative duration
+    (0, 2, 3, 50);   -- dangling dest id (3 not in _seed_fi)
+
+  select count(*) into bad from (
+    select origin_seed_id as id from _matrix_fi union select dest_seed_id from _matrix_fi
+  ) ids where not exists (select 1 from _seed_fi s where s.id = ids.id);
+  assert bad > 0, 'referential-closure predicate failed to flag a dangling seed id';
+
+  select count(*) into bad from _matrix_fi where origin_seed_id = dest_seed_id and seconds is distinct from 0;
+  assert bad > 0, 'zero-diagonal predicate failed to flag a non-zero diagonal';
+
+  select count(*) into bad from _matrix_fi where seconds is not null and (seconds < 0 or seconds > 25200);
+  assert bad > 0, 'value-sanity predicate failed to flag a negative duration';
+
+  raise notice 'U4b fault-injection checks passed (gate predicates catch faults)';
+end
+$$;
+
+-- ===========================================================================
 -- U5 — retrieval RPC (run after db/rpc.sql AND a loaded snapshot)
 -- ===========================================================================
 do $$
