@@ -7,7 +7,7 @@
 
 // Base URL of the PostgREST instance in front of your self-hosted Postgres
 // (behind a reverse proxy that terminates TLS and restricts CORS to this site).
-export const POSTGREST_BASE = "https://a11uxi19dmliw6c3kzs6sx2e.178.105.179.190.sslip.io";
+export const POSTGREST_BASE = "https://distvis.v1r3.com";
 
 // Anonymous JWT, if your PostgREST requires one for the anon role. Leave "" if
 // the anon role is reachable without a token. This is the PUBLIC anon key only.
