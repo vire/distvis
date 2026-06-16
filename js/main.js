@@ -40,11 +40,35 @@ function cacheSet(key, payload) {
 // --- Map setup -------------------------------------------------------------
 
 const map = L.map("map", { zoomControl: true }).setView([49.82, 15.47], 7); // Czech Republic
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-}).addTo(map);
 map.zoomControl.setPosition("bottomleft");
+
+// Base layers: OSM (default) and ČÚZK aerial orthophoto of Czechia. The ortho is
+// served as WMS in EPSG:3857 (Leaflet's CRS) because ČÚZK's WMTS only publishes
+// S-JTSK tiles, which wouldn't align with the Web-Mercator map. Both go into the
+// tile pane, so the cell overlay always renders on top regardless of which is active.
+const baseLayers = {
+  osm: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }),
+  ortho: L.tileLayer.wms("https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer", {
+    layers: "0",
+    format: "image/jpeg",
+    maxZoom: 19,
+    attribution: 'Ortofoto &copy; <a href="https://geoportal.cuzk.cz" target="_blank" rel="noopener">ČÚZK</a>',
+  }),
+};
+let activeBaseKey = null;
+
+/** Swap the base layer underneath the cells/marker. Leaflet drops the old layer's
+ *  attribution and shows the new one's, so the credit line updates on switch. */
+function setBaseLayer(key) {
+  if (key === activeBaseKey || !baseLayers[key]) return;
+  if (activeBaseKey) map.removeLayer(baseLayers[activeBaseKey]);
+  baseLayers[key].addTo(map);
+  activeBaseKey = key;
+}
+setBaseLayer("osm");
 
 const canvasRenderer = L.canvas({ padding: 0.3 });
 const cellLayer = L.layerGroup().addTo(map);
@@ -57,6 +81,7 @@ const ui = {
   minimizeBtn: document.getElementById("minimize-btn"),
   badge: document.getElementById("panel-badge"),
   badgeLabel: document.getElementById("badge-label"),
+  basemap: document.getElementById("basemap"),
   radius: document.getElementById("radius"),
   opacity: document.getElementById("opacity"),
   status: document.getElementById("status"),
@@ -165,6 +190,10 @@ function startCompute() {
     setStatus(`Something went wrong: ${err?.message ?? err}. Click the map or change a setting to retry.`, "error");
   });
 }
+
+// Base map is a pure view toggle — swap tiles, leave the cells/marker and any
+// in-flight computation untouched.
+ui.basemap.addEventListener("change", () => setBaseLayer(ui.basemap.value));
 
 // Debounce rapid radius changes so flipping through options fires one request.
 let settingsTimer;
