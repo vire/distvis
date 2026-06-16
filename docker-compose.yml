@@ -1,0 +1,205 @@
+# docker-compose.yml — distvis backend for Coolify (Docker Compose resource).
+#
+# Deploys the always-on services: PostgreSQL+PostGIS and PostgREST. The offline
+# OSRM precompute is a different file (precompute/docker-compose.yml) and is NOT
+# deployed here.
+#
+# In Coolify: New Resource → Docker Compose → point it at this repo (this file is
+# the repo-root docker-compose.yml Coolify looks for by default). Coolify
+# substitutes the SERVICE_* "magic" variables below — generating one consistent
+# password it injects into both the DB init and PostgREST, and a public TLS
+# domain for the API — so there are no secrets to commit.
+#
+# On FIRST boot (empty volume) the DB runs db/schema.sql + db/rpc.sql, baked into
+# the image via Dockerfile.db. Load the precomputed matrix afterward with
+# precompute/load.sql (see precompute/README.md).
+
+services:
+  db:
+    # Built from Dockerfile.db, which BAKES db/schema.sql + db/rpc.sql into
+    # /docker-entrypoint-initdb.d. Coolify builds from the repo, so the init
+    # scripts are reliably present — host bind-mounts of repo files are NOT
+    # honored by Coolify's compose deploy (they left the DB schemaless).
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: distvis
+      POSTGRES_USER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+    volumes:
+      - distvis-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d distvis"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs on EVERY deploy (not just first boot): create the `authenticator` login
+  # role if missing and (re)set its password to the current env value, then grant
+  # it `anon`. This is the durable fix for the password-drift restart loop —
+  # initdb scripts only run on an empty volume, so a later password change would
+  # otherwise leave the role stale and crash-loop PostgREST.
+  db-init:
+    image: postgres:16
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: distvis
+      PGUSER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      AUTHENTICATOR_PASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        # Self-sufficient role provisioning (tolerate "already exists"); CREATE
+        # has no password to interpolate. anon is also created by schema.sql on a
+        # fresh volume — creating it here too means GRANT can't fail if it isn't.
+        psql -c "CREATE ROLE anon NOLOGIN" 2>/dev/null || true
+        psql -c "CREATE ROLE authenticator LOGIN" 2>/dev/null || true
+        # :'pw' interpolation only works via stdin/-f (NOT -c), so feed a heredoc.
+        psql -v ON_ERROR_STOP=1 -v pw="$$AUTHENTICATOR_PASSWORD" <<'SQL'
+        ALTER ROLE authenticator WITH LOGIN PASSWORD :'pw';
+        GRANT anon TO authenticator;
+        SQL
+        echo "roles reconciled (anon, authenticator)"
+
+  postgrest:
+    image: postgrest/postgrest:latest
+    restart: unless-stopped
+    environment:
+      # Password is supplied via PGPASSWORD (libpq), NOT inline in the URI — so
+      # no credentialed connection string is committed.
+      PGRST_DB_URI: postgres://authenticator@db:5432/distvis
+      PGPASSWORD: ${SERVICE_PASSWORD_AUTHENTICATOR}
+      PGRST_DB_SCHEMAS: api          # ONLY api — keeps dist base tables off REST (KTD8)
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_POOL: 10
+      PGRST_SERVER_PORT: 3000
+      # Coolify generates a TLS domain for this service+port and exposes it.
+      SERVICE_FQDN_POSTGREST_3000: /
+    depends_on:
+      db:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Precompute pipeline (profile: precompute) — a ONE-SHOT batch job, NOT
+  # always-on. A normal `docker compose up` (deploy) starts only db + postgrest;
+  # these run only with the profile. Build/refresh the matrix on demand from
+  # Coolify's terminal:
+  #   docker compose --profile precompute up        # fetch->build->serve->matrix->load, then the one-shots exit
+  #   docker compose stop osrm-routed               # free the OSRM server's RAM afterward
+  # The OSM extract + contracted graph + CSV outputs persist in named volumes,
+  # so re-runs skip the download/extract. OSRM is only needed while the matrix
+  # builds. db/postgrest are left running throughout.
+  # ---------------------------------------------------------------------------
+
+  osrm-fetch:
+    profiles: ["precompute"]
+    image: curlimages/curl:latest
+    volumes:
+      - osrm-graph:/data
+    command:
+      - sh
+      - -c
+      - test -f /data/czech-republic-latest.osm.pbf || curl -fL -o /data/czech-republic-latest.osm.pbf https://download.geofabrik.de/europe/czech-republic-latest.osm.pbf
+
+  osrm-build:
+    profiles: ["precompute"]
+    image: ghcr.io/project-osrm/osrm-backend
+    volumes:
+      - osrm-graph:/data
+    depends_on:
+      osrm-fetch:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - test -f /data/czech-republic-latest.osrm.hsgr || (osrm-extract -p /opt/car.lua /data/czech-republic-latest.osm.pbf && osrm-contract /data/czech-republic-latest.osrm)
+
+  osrm-routed:
+    profiles: ["precompute"]
+    image: ghcr.io/project-osrm/osrm-backend
+    volumes:
+      - osrm-graph:/data
+    depends_on:
+      osrm-build:
+        condition: service_completed_successfully
+    command: osrm-routed --algorithm ch --max-table-size 8000 /data/czech-republic-latest.osrm
+
+  # seeds.mjs + build-matrix.mjs → /out (shared volume). Reads scripts from the
+  # repo bind; waits for OSRM to answer before building.
+  precompute:
+    profiles: ["precompute"]
+    image: node:20-slim
+    working_dir: /repo/precompute
+    volumes:
+      - .:/repo:ro
+      - precompute-out:/out
+    environment:
+      OUT_DIR: /out
+      OSRM_CAR: http://osrm-routed:5000
+      SEED_SPACING_KM: "5"
+    depends_on:
+      osrm-routed:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo "waiting for OSRM to be ready..."
+        for i in $$(seq 1 90); do
+          if node -e "fetch(process.env.OSRM_CAR+'/table/v1/driving/14.42,50.08?sources=0&annotations=duration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then break; fi
+          sleep 2
+        done
+        node seeds.mjs && node build-matrix.mjs
+
+  # Loads /out into the live DB via load.sql (staging → validate → atomic swap),
+  # connecting as the DB owner (DDL + swap need owner privileges), then checks.sql.
+  precompute-load:
+    profiles: ["precompute"]
+    image: postgres:16
+    working_dir: /out
+    volumes:
+      - .:/repo:ro
+      - precompute-out:/out
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: distvis
+      PGUSER: ${SERVICE_USER_POSTGRES:-distvis_owner}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      EXTRACT_DATE: ""                 # blank → defaults to today's date at load time
+      PROFILE_VERSION: "osrm car (ch)"
+      SEED_SPACING_KM: "5"
+    depends_on:
+      precompute:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        cd /out
+        psql -v ON_ERROR_STOP=1 \
+          -v extract_date="$${EXTRACT_DATE:-$$(date +%F)}" \
+          -v profile_version="$${PROFILE_VERSION}" \
+          -v seed_spacing_km="$${SEED_SPACING_KM}" \
+          -v seed_set_hash="$$(cat /out/seed_set_hash.txt)" \
+          -f /repo/precompute/load.sql
+        psql -v ON_ERROR_STOP=1 -f /repo/db/checks.sql
+
+volumes:
+  distvis-db-data:
+  osrm-graph:
+  precompute-out:

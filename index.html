@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>distvis — travel time map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <button id="panel-badge" class="panel-badge" type="button" hidden aria-label="Open controls" aria-expanded="false">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="9" cy="6" r="2.4" fill="currentColor" stroke="none" /><circle cx="15" cy="12" r="2.4" fill="currentColor" stroke="none" /><circle cx="8" cy="18" r="2.4" fill="currentColor" stroke="none" />
+    </svg>
+    <span id="badge-label">Controls</span>
+  </button>
+
+  <div id="panel" class="ui-card">
+    <div class="panel-header">
+      <h1>distvis</h1>
+      <button id="minimize-btn" class="icon-btn" type="button" aria-label="Minimize panel" title="Minimize">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="17" x2="18" y2="17" />
+        </svg>
+      </button>
+    </div>
+    <p class="hint">Click the map or search a place to set the origin. Cells are colored by travel time from it.</p>
+
+    <form id="search-form" autocomplete="off">
+      <input id="search-input" type="text" placeholder="Search a place… e.g. Prague" />
+      <button type="submit">Go</button>
+    </form>
+    <ul id="search-results" hidden></ul>
+
+    <div class="row">
+      <label for="radius">Radius</label>
+      <select id="radius">
+        <option value="50">50 km</option>
+        <option value="100">100 km</option>
+        <option value="200">200 km</option>
+        <option value="300" selected>300 km (country)</option>
+        <option value="450">450 km</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="opacity">Opacity</label>
+      <input id="opacity" type="range" min="0" max="100" value="55" />
+    </div>
+
+    <div id="status" class="status">No origin selected.</div>
+
+    <div id="legend" hidden>
+      <div class="legend-bar" id="legend-bar"></div>
+      <div class="legend-labels" id="legend-labels"></div>
+      <div class="legend-extra"><span class="swatch unreachable"></span> unreachable / no road</div>
+    </div>
+
+    <p class="credits">
+      Travel times pre-computed with <a href="https://project-osrm.org" target="_blank" rel="noopener">OSRM</a>
+      over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> data,
+      served from Postgres/<a href="https://postgis.net" target="_blank" rel="noopener">PostGIS</a> ·
+      Geocoding: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a>.
+      Coverage: Czechia. Data date shown in the status line.
+    </p>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
