@@ -10,9 +10,9 @@
 # password it injects into both the DB init and PostgREST, and a public TLS
 # domain for the API — so there are no secrets to commit.
 #
-# On FIRST boot the DB runs db/schema.sql + db/rpc.sql + the authenticator init
-# (mounted into /docker-entrypoint-initdb.d). Load the precomputed matrix
-# afterward with precompute/load.sql (see DEPLOYMENT.md §4).
+# On FIRST boot (empty volume) the DB runs db/schema.sql + db/rpc.sql, baked into
+# the image via Dockerfile.db. Load the precomputed matrix afterward with
+# precompute/load.sql (see precompute/README.md).
 
 services:
   db:

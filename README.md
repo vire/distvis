@@ -4,9 +4,50 @@ Travel-time visualization on a Leaflet map using Voronoi cells, for **Czechia**.
 
 Pick an origin (click the map, or search e.g. **Prague**) and the surrounding
 area — up to a 450 km radius — is tiled with Voronoi cells, each colored by how
-long it takes to travel there from the origin. Travel times are **pre-computed**
+long it takes to drive there from the origin. Travel times are **pre-computed**
 and served from a database, so the map paints in a single fast request instead of
 routing live.
+
+## Architecture
+
+Three independent pieces:
+
+| Component | Lives in | What it is |
+|---|---|---|
+| **Static frontend** | `index.html`, `js/`, `css/` | A no-build static site (ES modules + CDN Leaflet & d3-delaunay). Renders the map, snaps the origin, colors the cells. |
+| **Data store + API** | `db/`, `Dockerfile.db`, `docker-compose.yml` | Self-hosted Postgres + PostGIS holding the seed grid and travel-time matrix, behind a read-only [PostgREST](https://postgrest.org) API. |
+| **Precompute pipeline** | `precompute/` | Offline, one-time tooling: a self-hosted [OSRM](https://project-osrm.org) builds the matrix, then SQL loads it with an atomic swap. |
+
+```
+                  click / search (set origin)
+                            │
+ browser ── js/datasource.js ──HTTPS POST──▶ PostgREST ──▶ api.cells_around(lng, lat, radius)
+                                                                │  snap to nearest seed (PostGIS)
+                                                                │  filter destinations within radius
+                                                                ▼
+                                                  dist.seed · dist.matrix   (private schema)
+                                                                ▲
+   precompute/  OSRM table ─▶ matrix.csv ──load.sql (stage → validate → atomic swap)
+```
+
+The browser only ever calls one function; it never sees the raw matrix.
+
+## Data model & exposure
+
+- **Seed grid.** A fixed grid (~5 km spacing) clipped to the Czech border
+  (`precompute/cz-boundary.geojson`) — ~3,700 points. IDs are derived
+  deterministically from geometry, so they're stable across rebuilds.
+- **Matrix.** The full seed-to-seed **car-driving** duration matrix (one snapshot
+  ≈ N² rows). Unreachable pairs are retained as `NULL`.
+- **Private base tables.** `dist.seed`, `dist.matrix`, and `dist.matrix_version`
+  live in a private `dist` schema that PostgREST does **not** expose. Only an `api`
+  schema is exposed, holding a single function `cells_around(lng, lat, radius_m)`.
+  The anonymous role may only **execute** that function (input-clamped and
+  statement-timeout-bounded) — it cannot read the tables. PostGIS lives in
+  `public` and powers the nearest-seed snap and the radius filter.
+- **Versioned snapshots.** Each load records a `matrix_version` row and swaps the
+  new seed/matrix tables in inside a single transaction, keeping the previous as
+  `*_prev` for rollback — so refreshes are atomic and downtime-free.
 
 ## How travel times are computed
 
@@ -15,8 +56,8 @@ precomputed store. Knowing the pipeline explains most visual quirks.
 
 ### 1. Pre-computation (offline, one-time)
 
-A fixed grid of **seed points** (default 5 km spacing) covers Czechia. A
-self-hosted [OSRM](https://project-osrm.org) computes the full seed-to-seed
+A fixed grid of **seed points** (default 5 km spacing, clipped to the Czech
+border) covers Czechia. A self-hosted OSRM computes the full seed-to-seed
 **car-driving** travel-time matrix once over
 [OpenStreetMap](https://www.openstreetmap.org/copyright) road data. The matrix is
 loaded into Postgres/[PostGIS](https://postgis.net) and published as a versioned
@@ -66,10 +107,10 @@ cell for the exact minutes.
 - **Radius** — how far out to show cells (50–450 km).
 - **Opacity** — overlay transparency.
 
-## Running
+## Running the frontend
 
-The frontend is plain static files (no build step). Point it at your data
-service by setting `POSTGREST_BASE` (and `ANON_JWT` if required) in
+The frontend is plain static files (no build step). Point it at your data service
+by setting `POSTGREST_BASE` (and `ANON_JWT` if your API requires one) in
 `js/config.js`, then serve over HTTP:
 
 ```sh
@@ -78,15 +119,42 @@ python3 -m http.server 8000
 ```
 
 then open <http://localhost:8000>. Pushes to `main` deploy automatically to
-GitHub Pages.
+GitHub Pages. Leaflet and d3-delaunay load from CDNs; geocoding uses
+[Nominatim](https://nominatim.org).
 
-Leaflet and d3-delaunay load from CDNs; geocoding uses
-[Nominatim](https://nominatim.org). Travel-time data comes from your
-Postgres/PostGIS + PostgREST backend.
+> Serve the frontend over **HTTPS** in production and give the API an HTTPS
+> endpoint too — a browser blocks an HTTPS page from calling an `http://` API
+> (mixed content).
 
-## Building the data
+## Standing up the backend
 
-Standing up the backend (self-hosted Postgres + PostGIS + PostgREST) and building
-the matrix (self-hosted OSRM precompute → COPY → atomic swap) is described
-end-to-end in [`precompute/README.md`](precompute/README.md). The design of
-record is `docs/plans/2026-06-15-001-feat-precomputed-distance-store-plan.md`.
+The data store + API run as a small container stack (`docker-compose.yml`):
+
+- **`db`** — Postgres + PostGIS, built from `Dockerfile.db`, which bakes
+  `db/schema.sql` + `db/rpc.sql` into the image's init scripts. On first boot
+  (empty data volume) those create the `dist` + `api` schemas, the `anon` role,
+  the tables, and the `cells_around` function.
+- **`postgrest`** — exposes **only** the `api` schema, so the base tables stay
+  unreachable over HTTP.
+
+Provide the database and `authenticator` credentials via the compose environment
+variables (`SERVICE_USER_POSTGRES`, `SERVICE_PASSWORD_POSTGRES`,
+`SERVICE_PASSWORD_AUTHENTICATOR`) and bring it up on any container host. Then set
+the frontend's `POSTGREST_BASE` to the API's URL.
+
+A fresh backend is **empty** until the matrix is loaded — until then
+`cells_around` returns `{status:"unavailable"}` and the map shows "data service
+unavailable". No credentials are committed; `scripts/check-no-secrets.sh` guards
+against that.
+
+## Building & refreshing the data
+
+The matrix is a **static snapshot** you build once and refresh occasionally
+(against a fresh OSM extract). The full operator runbook — OSRM graph build, seed
+generation, matrix build, and the staging + atomic-swap load — is in
+[`precompute/README.md`](precompute/README.md). `load.sql` stages, validates, and
+atomically swaps the new snapshot in (keeping the previous as `*_prev` for
+rollback), so a refresh has no API downtime.
+
+The design of record is
+`docs/plans/2026-06-15-001-feat-precomputed-distance-store-plan.md`.
