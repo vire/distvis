@@ -23,13 +23,13 @@ drop table if exists dist.matrix_stage;
 -- 1. Stage seeds: COPY raw lng/lat, then build geography.
 create table dist.seed_raw (id integer, lng double precision, lat double precision);
 \copy dist.seed_raw(id,lng,lat) from 'seeds.csv' with (format csv, header true)
-create table dist.seed_stage (id integer primary key, geom extensions.geography(Point,4326) not null);
+create table dist.seed_stage (id integer primary key, geom public.geography(Point,4326) not null);
 -- Enable RLS on staging so the renamed-in live table keeps schema.sql's
 -- defense-in-depth posture after the swap (the table owner bypasses RLS, so the
 -- load below is unaffected).
 alter table dist.seed_stage enable row level security;
 insert into dist.seed_stage(id, geom)
-  select id, extensions.st_setsrid(extensions.st_makepoint(lng, lat), 4326)::extensions.geography
+  select id, public.st_setsrid(public.st_makepoint(lng, lat), 4326)::public.geography
   from dist.seed_raw;
 drop table dist.seed_raw;
 create index seed_stage_geom_gix on dist.seed_stage using gist (geom);
@@ -79,7 +79,8 @@ begin
 
   -- Value sanity: no negatives; nothing implausibly large for the country.
   select count(*) into bad_val from dist.matrix_stage
-   where seconds is not null and (seconds < 0 or seconds > 25200);  -- 7 h cap
+   where seconds is not null and (seconds < 0 or seconds > 36000);  -- 10 h cap
+   -- (CZ extremes + remote-seed access detours legitimately reach ~8 h; >10 h would signal a unit/placement bug)
   assert bad_val = 0, format('%s seconds values out of range [0, 25200]', bad_val);
 
   raise notice 'U4 validation gate passed (N=% seeds)', n;
